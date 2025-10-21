@@ -186,8 +186,56 @@ Deny from all
 	#################################################
 	# Data save/load & files
 	#################################################
-	function load($file){return (file_exists($file) ? unserialize(gzinflate(base64_decode(substr(file_get_contents($file),9,-strlen(6))))) : array() );}
-	function save($file,$data){return file_put_contents($file, '<?php /* '.base64_encode(gzdeflate(serialize($data))).' */ ?>');}
+        function load($file){
+                if (!is_file($file)){
+                        return array();
+                }
+
+                $raw=file_get_contents($file);
+                if ($raw===false){
+                        return array();
+                }
+
+                if (strncmp($raw,'<?php /* ',9)!==0 || substr($raw,-6)!==' */ ?>'){
+                        return array();
+                }
+
+                $payload=substr($raw,9,-6);
+                if ($payload===false){
+                        return array();
+                }
+
+                $decoded=base64_decode($payload,true);
+                if ($decoded===false){
+                        return array();
+                }
+
+                $inflated=@gzinflate($decoded);
+                if ($inflated===false){
+                        return array();
+                }
+
+                $data=@unserialize($inflated,array('allowed_classes'=>false));
+                return (is_array($data)?$data:array());
+        }
+        function save($file,$data){
+                if (!is_array($data)){
+                        return false;
+                }
+
+                $serialized=serialize($data);
+                $compressed=gzdeflate($serialized);
+                if ($compressed===false){
+                        return false;
+                }
+
+                $encoded=base64_encode($compressed);
+                if ($encoded===false){
+                        return false;
+                }
+
+                return file_put_contents($file,'<?php /* '.$encoded.' */ ?>');
+        }
 	function store($ids=null){if (!$ids){return false;}natcasesort($ids);return save($_SESSION['id_file'],$ids);}
 	function unstore(){return array_filter(load($_SESSION['id_file']));}
 	function save_folder_share($array=null){return save($_SESSION['folder_share_file'],$array);}
@@ -259,35 +307,64 @@ Deny from all
 	} 
 
 	# store all client access to a file
-	function store_access_stat($file=null,$id=null){
-		if (!$file||!$id){return false;}
-		$host=$ref='&#8709;';
-		if (isset($_SERVER['REMOTE_HOST'])){$host=$_SERVER['REMOTE_HOST'];}
-		if (isset($_SERVER['HTTP_REFERER'])){$ref=$_SERVER['HTTP_REFERER'];}
-		if (isset($_GET['rss'])){$access='RSS';}
-		elseif (isset($_GET['json'])){$access='Json';}
-		elseif (isset($_GET['export'])){$access='Export';}
-		else{$access='Website';}
+        function encode_json($value){
+                $json=json_encode($value,JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);
+                if ($json===false){
+                        return '[]';
+                }
 
-		$data=array(
-			'ip'=>$_SERVER['REMOTE_ADDR'],
-			'host'=>$host,
-			'referrer'=>$ref,
-			'date'=>date('D d M, H:i:s'),
-			'file'=>$file,
-			'id'=>$id,
-			'access'=>$access
-		);
-		
-		$stats=load($_SESSION['stats_file']);
-		if (!is_array($stats)){$stats=array();}
-		if (count($stats)>conf('stats_max_entries')){
-			$stats=array_values($stats);
-			unset($stats[0]);
-		}
-		$stats[]=$data;
-		save($_SESSION['stats_file'], $stats);
-	}
+                return $json;
+        }
+        function store_access_stat($file=null,$id=null){
+                if (!is_string($file)||$file===''){return false;}
+                if (!is_string($id)||$id===''){return false;}
+
+                $host='&#8709;';
+                if (isset($_SERVER['REMOTE_HOST'])&&$_SERVER['REMOTE_HOST']!==''){
+                        $host=substr(strip_tags((string)$_SERVER['REMOTE_HOST']),0,255);
+                }
+
+                $ref='&#8709;';
+                if (isset($_SERVER['HTTP_REFERER'])&&$_SERVER['HTTP_REFERER']!==''){
+                        $ref=substr(strip_tags((string)$_SERVER['HTTP_REFERER']),0,2048);
+                }
+
+                if (isset($_GET['rss'])){$access='RSS';}
+                elseif (isset($_GET['json'])){$access='Json';}
+                elseif (isset($_GET['export'])){$access='Export';}
+                else{$access='Website';}
+
+                $ip='0.0.0.0';
+                if (isset($_SERVER['REMOTE_ADDR'])){
+                        $candidate=(string)$_SERVER['REMOTE_ADDR'];
+                        $zone=strpos($candidate,'%');
+                        if ($zone!==false){$candidate=substr($candidate,0,$zone);}
+                        if (filter_var($candidate,FILTER_VALIDATE_IP)!==false){
+                                $ip=$candidate;
+                        }
+                }
+
+                $data=array(
+                        'ip'=>$ip,
+                        'host'=>$host,
+                        'referrer'=>$ref,
+                        'date'=>date('D d M, H:i:s'),
+                        'file'=>$file,
+                        'id'=>$id,
+                        'access'=>$access
+                );
+
+                $stats=load($_SESSION['stats_file']);
+                if (!is_array($stats)){$stats=array();}
+
+                $stats[]=$data;
+                $limit=(int)conf('stats_max_entries');
+                if ($limit>0 && count($stats)>$limit){
+                        $stats=array_slice($stats,-$limit);
+                }
+
+                save($_SESSION['stats_file'], $stats);
+        }
 	function addslash_if_needed($chaine){
 		if (substr($chaine,strlen($chaine)-1,1)!='/'&&!empty($chaine)){return $chaine.'/';}else{return $chaine;}
 	}
@@ -938,12 +1015,19 @@ Deny from all
 		}else{return false;}
 	}
 
-	function navigatorLanguage(){
-		if (!empty($_SERVER['HTTP_ACCEPT_LANGUAGE'])){
-			$language = $_SERVER['HTTP_ACCEPT_LANGUAGE'];
-			return $language{0}.$language{1};
-		}else{return 'fr';}
-	}
+        function navigatorLanguage(){
+                if (empty($_SERVER['HTTP_ACCEPT_LANGUAGE'])){
+                        return 'fr';
+                }
+
+                $language=$_SERVER['HTTP_ACCEPT_LANGUAGE'];
+                $code=substr($language,0,2);
+                if ($code===false || strlen($code)<2){
+                        return 'fr';
+                }
+
+                return strtolower($code);
+        }
 
 
 
