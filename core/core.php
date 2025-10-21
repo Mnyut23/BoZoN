@@ -389,44 +389,99 @@ Deny from all
 		unset($array[$first]);
 		return $array;		
 	}
-	function unzip($file, $destination){ 
-	    if (!class_exists('ZipArchive')){return false;}
-	    $zip = new ZipArchive() ;
-	    if ($zip->open($file) !== TRUE) { return false;} 
-	   	$zip->extractTo($destination); 
-	    $zip->close(); 
-	    return true; 
-	}
+        function unzip($file, $destination){
+            if (!class_exists('ZipArchive')){return false;}
+            $zip = new ZipArchive() ;
+            if ($zip->open($file) !== TRUE) { return false;}
+                $zip->extractTo($destination);
+            $zip->close();
+            return true;
+        }
 
-	function zip($source, $destination)
-	{
-		if (!extension_loaded('zip')){return false;}
-		$zip = new ZipArchive();
-		if (is_file($destination)){unlink($destination);}
-		if (!$zip->open($destination, ZIPARCHIVE::CREATE)) {return false;}
-		if (is_string($source)){$source=array($source);}
-		foreach($source as $item){
-			if (is_dir($item) === true){
-				$files = array_keys(iterator_to_array(new RecursiveIteratorIterator(new RecursiveDirectoryIterator($item), RecursiveIteratorIterator::SELF_FIRST)));
-				$files[0]=dirname($files[1]);
-				foreach ($files as $key=>$file){
-					# Ignore "." and ".." folders
-					if( in_array(substr($file, strrpos($file, '/')+1), array('.', '..')) ){continue;}
-					$file_short=utf8_decode(str_replace(addslash_if_needed($_SESSION['upload_root_path'].$_SESSION['upload_user_path'].$_SESSION['current_path']),'',$file));
-					if (is_dir($file) === true){
-						$zip->addEmptyDir($file_short);
-					}else if (is_file($file) === true){
-						$zip->addFromString($file_short, file_get_contents($file));
-					}
-				}
-			}
-			else if (is_file($item) === true){
-				$zip->addFromString(_basename($item), file_get_contents($item));
-			}
+        function myFread($filename, $chunkSize = 1048576){
+                if (!is_string($filename) || $filename === '' || !is_file($filename) || !is_readable($filename)){return false;}
+                $handle = fopen($filename, 'rb');
+                if ($handle === false){return false;}
+                # Stream chunks to keep memory low
+                while (!feof($handle)){
+                        $buffer = fread($handle, $chunkSize);
+                        if ($buffer === false){
+                                fclose($handle);
+                                return false;
+                        }
+                        echo $buffer;
+                        if (ob_get_level() > 0){ob_flush();}
+                        flush();
+                }
+                fclose($handle);
+                return true;
+        }
 
-		}
+        function zipSanitizeName($value){
+                if (!is_string($value) || $value === ''){return $value;}
+                # Keep compatibility with legacy unzip tools
+                if (function_exists('iconv')){
+                        $converted = @iconv('UTF-8', 'ISO-8859-1//TRANSLIT//IGNORE', $value);
+                        if ($converted !== false && $converted !== ''){return $converted;}
+                }
+                return $value;
+        }
 
-	}
+        function zip($source, $destination)
+        {
+                if (!extension_loaded('zip') || !class_exists('ZipArchive')){return false;}
+                $zip = new ZipArchive();
+                if (is_file($destination) && !@unlink($destination)){return false;}
+                if (!$zip->open($destination, ZipArchive::CREATE | ZipArchive::OVERWRITE)) {return false;}
+                $sources = is_array($source) ? $source : array($source);
+                foreach($sources as $item){
+                        if (is_dir($item)){
+                                $realBase = realpath($item);
+                                $realBase = $realBase === false ? $item : $realBase;
+                                $realBase = addslash_if_needed(str_replace('\\', '/', $realBase));
+                                $sessionBase = '';
+                                if (isset($_SESSION['upload_root_path'], $_SESSION['upload_user_path'], $_SESSION['current_path'])){
+                                        $sessionBase = addslash_if_needed(str_replace('\\', '/', $_SESSION['upload_root_path'].$_SESSION['upload_user_path'].$_SESSION['current_path']));
+                                }
+                                if ($sessionBase === ''){$sessionBase = $realBase;}
+                                $iterator = new RecursiveIteratorIterator(
+                                        new RecursiveDirectoryIterator($item, RecursiveDirectoryIterator::SKIP_DOTS),
+                                        RecursiveIteratorIterator::SELF_FIRST
+                                );
+                                foreach ($iterator as $fileInfo){
+                                        $file = $fileInfo->getPathname();
+                                        $normalizedFile = str_replace('\\', '/', $file);
+                                        $file_short = ltrim(str_replace($sessionBase, '', $normalizedFile), '/');
+                                        if ($file_short === $normalizedFile){
+                                                $file_short = ltrim(str_replace($realBase, '', $normalizedFile), '/');
+                                        }
+                                        $file_short = zipSanitizeName($file_short);
+                                        if ($file_short === ''){continue;}
+                                        if ($fileInfo->isDir()){
+                                                if (!$zip->addEmptyDir($file_short)){
+                                                        $zip->close();
+                                                        return false;
+                                                }
+                                        }else{
+                                                $contents = file_get_contents($file);
+                                                if ($contents === false || !$zip->addFromString($file_short, $contents)){
+                                                        $zip->close();
+                                                        return false;
+                                                }
+                                        }
+                                }
+                        }elseif (is_file($item)){
+                                $contents = file_get_contents($item);
+                                $filename = zipSanitizeName(_basename($item));
+                                if ($contents === false || !$zip->addFromString($filename, $contents)){
+                                        $zip->close();
+                                        return false;
+                                }
+                        }
+                }
+                return $zip->close();
+
+        }
 	
 	function check_path($path){
 		return (strpos($path, '//')===false && strpos($path, '..')===false && ( empty($path[0]) || (!empty($path[0]) && $path[0]!='/') || (!empty($path[0]) && $path[0]!='.') ) );
@@ -938,12 +993,14 @@ Deny from all
 		}else{return false;}
 	}
 
-	function navigatorLanguage(){
-		if (!empty($_SERVER['HTTP_ACCEPT_LANGUAGE'])){
-			$language = $_SERVER['HTTP_ACCEPT_LANGUAGE'];
-			return $language{0}.$language{1};
-		}else{return 'fr';}
-	}
+        function navigatorLanguage(){
+                if (!empty($_SERVER['HTTP_ACCEPT_LANGUAGE'])){
+                        $language = $_SERVER['HTTP_ACCEPT_LANGUAGE'];
+                        $code = substr($language, 0, 2);
+                        if ($code !== false && strlen($code) === 2){return $code;}
+                }
+                return 'fr';
+        }
 
 
 
