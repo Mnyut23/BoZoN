@@ -42,7 +42,7 @@
                 $share_token=$entry['token'];
                 $share_url='index.php?share='.$id.'&t='.$share_token;
                 $absolute_share_url=$_SESSION['home'].'?share='.$id.'&t='.$share_token;
-                header('Cache-Control: no-store, private');
+                header('Cache-Control: private, no-store');
                 header('Pragma: no-cache');
                 $f=id2file($id);
 
