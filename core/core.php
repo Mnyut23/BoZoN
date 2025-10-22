@@ -247,8 +247,395 @@ Deny from all
         }
 	function store($ids=null){if (!$ids){return false;}natcasesort($ids);return save($_SESSION['id_file'],$ids);}
 	function unstore(){return array_filter(load($_SESSION['id_file']));}
-	function save_folder_share($array=null){return save($_SESSION['folder_share_file'],$array);}
-	function load_folder_share(){return load($_SESSION['folder_share_file']);}
+        function share_storage_defaults(){
+                return array('shares'=>array());
+        }
+
+        function save_folder_share($array=null){
+                if (!is_array($array)){
+                        $array=share_storage_defaults();
+                }
+
+                if (empty($array['shares'])||!is_array($array['shares'])){
+                        $array['shares']=array();
+                }
+
+                $result=save($_SESSION['folder_share_file'],$array);
+                load_folder_share(true);
+
+                return $result;
+        }
+
+        function load_folder_share($force_refresh=false){
+                static $cache=null;
+
+                if ($force_refresh){
+                        $cache=null;
+                }
+
+                if ($cache!==null){
+                        return $cache;
+                }
+
+                $raw=load($_SESSION['folder_share_file']);
+                if (!is_array($raw)){
+                        $raw=share_storage_defaults();
+                }
+
+                $dirty=false;
+                $normalized=share_storage_normalize($raw,$dirty);
+
+                if ($dirty){
+                        save($_SESSION['folder_share_file'],$normalized);
+                        $cache=$normalized;
+                        return $cache;
+                }
+
+                $cache=$normalized;
+                return $cache;
+        }
+
+        function share_storage_normalize($raw,&$dirty){
+                $dirty=false;
+
+                if (!isset($raw['shares'])||!is_array($raw['shares'])){
+                        $converted=array();
+                        foreach ($raw as $recipient=>$items){
+                                if (!is_array($items)){
+                                        continue;
+                                }
+
+                                foreach ($items as $id=>$entry){
+                                        if (!is_string($id)||$id===''){
+                                                $dirty=true;
+                                                continue;
+                                        }
+
+                                        if (!isset($converted[$id])){
+                                                $converted[$id]=array(
+                                                        'owner'=>(isset($entry['owner'])&&is_string($entry['owner']))?$entry['owner']:'',
+                                                        'path'=>(isset($entry['path'])&&is_string($entry['path']))?$entry['path']:(isset($entry['folder'])&&is_string($entry['folder'])?$entry['folder']:''),
+                                                        'token'=>null,
+                                                        'created_at'=>time(),
+                                                        'expires_at'=>null,
+                                                        'recipients'=>array(),
+                                                        'active'=>true,
+                                                );
+                                        }
+
+                                        if (!empty($entry['from'])&&is_string($entry['from'])&&$converted[$id]['owner']===''){
+                                                $converted[$id]['owner']=$entry['from'];
+                                        }
+
+                                        if (!empty($recipient)&&is_string($recipient)){
+                                                $converted[$id]['recipients'][]=$recipient;
+                                        }
+                                }
+                        }
+
+                        $raw=array('shares'=>$converted);
+                        $dirty=true;
+                }
+
+                $normalized=array('shares'=>array());
+                foreach ($raw['shares'] as $id=>$entry){
+                        if (!is_string($id)||$id===''){
+                                $dirty=true;
+                                continue;
+                        }
+
+                        $normalized_entry=share_normalize_entry($id,$entry,$dirty);
+                        if ($normalized_entry){
+                                $normalized['shares'][$id]=$normalized_entry;
+                        }else{
+                                $dirty=true;
+                        }
+                }
+
+                return $normalized;
+        }
+
+        function share_normalize_entry($id,$entry,&$dirty){
+                if (!is_array($entry)){
+                        $dirty=true;
+                        return null;
+                }
+
+                $path=id2file($id);
+                if (!$path||(!is_dir($path)&&!is_file($path))){
+                        if (!empty($entry['path'])&&is_string($entry['path'])&&(is_dir($entry['path'])||is_file($entry['path']))){
+                                $path=$entry['path'];
+                        }else{
+                                return null;
+                        }
+                }
+
+                $owner=return_owner($id);
+                if (!$owner){
+                        if (!empty($entry['owner'])&&is_string($entry['owner'])){
+                                $owner=$entry['owner'];
+                        }elseif (!empty($entry['from'])&&is_string($entry['from'])){
+                                $owner=$entry['from'];
+                        }else{
+                                return null;
+                        }
+                }
+
+                $active=true;
+                if (isset($entry['active'])){
+                        $active=(bool)$entry['active'];
+                }else{
+                        $dirty=true;
+                }
+
+                $token=null;
+                if (!empty($entry['token'])&&is_string($entry['token'])){
+                        $token=$entry['token'];
+                }
+                if ($active){
+                        if (!$token){
+                                $token=share_new_token();
+                                $dirty=true;
+                        }
+                }else{
+                        if ($token!==null){
+                                $token=null;
+                                $dirty=true;
+                        }
+                }
+
+                $created=null;
+                if (isset($entry['created_at'])&&is_numeric($entry['created_at'])){
+                        $created=(int)$entry['created_at'];
+                }
+                if ($created===null||$created<=0){
+                        $created=time();
+                        $dirty=true;
+                }
+
+                $expires=null;
+                if (array_key_exists('expires_at',$entry)){
+                        if ($entry['expires_at']===null||$entry['expires_at']===''){
+                                $expires=null;
+                        }elseif (is_numeric($entry['expires_at'])){
+                                $expires=(int)$entry['expires_at'];
+                        }else{
+                                $dirty=true;
+                        }
+                }else{
+                        $dirty=true;
+                }
+
+                $recipients=array();
+                if (!empty($entry['recipients'])&&is_array($entry['recipients'])){
+                        foreach ($entry['recipients'] as $recipient){
+                                if (is_string($recipient)){
+                                        $recipient=trim($recipient);
+                                        if ($recipient!==''){
+                                                $recipients[$recipient]=true;
+                                        }
+                                }
+                        }
+                }
+
+                $normalized=array(
+                        'owner'=>(string)$owner,
+                        'path'=>$path,
+                        'token'=>$token,
+                        'created_at'=>$created,
+                        'expires_at'=>$expires,
+                        'recipients'=>array_keys($recipients),
+                        'active'=>$active,
+                );
+
+                if ($expires!==null&&$expires<=0){
+                        $normalized['expires_at']=null;
+                        $dirty=true;
+                }
+
+                return $normalized;
+        }
+
+        function share_is_expired($entry){
+                if (empty($entry)||!is_array($entry)){
+                        return true;
+                }
+
+                if (!empty($entry['expires_at'])&&is_int($entry['expires_at'])&&$entry['expires_at']>0){
+                        return $entry['expires_at']<time();
+                }
+
+                return false;
+        }
+
+        function share_is_active($entry){
+                if (empty($entry)||!is_array($entry)){
+                        return false;
+                }
+
+                if (share_is_expired($entry)){
+                        return false;
+                }
+
+                if (empty($entry['active'])){
+                        return false;
+                }
+
+                return !empty($entry['token'])&&is_string($entry['token']);
+        }
+
+        function share_new_token(): string{
+                try{
+                        return bin2hex(random_bytes(32));
+                }catch(\Throwable $exception){
+                        if (function_exists('openssl_random_pseudo_bytes')){
+                                $bytes=openssl_random_pseudo_bytes(32);
+                                if ($bytes!==false){
+                                        return bin2hex($bytes);
+                                }
+                        }
+
+                        return bin2hex(pack('d',microtime(true)).pack('V',mt_rand()));
+                }
+        }
+
+        function share_ensure_entry($id,$owner=null,$path=null){
+                if (!is_string($id)||$id===''){
+                        return null;
+                }
+
+                $storage=load_folder_share();
+                if (!empty($storage['shares'][$id])){
+                        $entry=$storage['shares'][$id];
+                        if (empty($entry['path'])||!is_string($entry['path'])){
+                                $entry['path']=id2file($id);
+                        }
+                        if ($owner&&empty($entry['owner'])){
+                                $entry['owner']=$owner;
+                        }
+                        if ($entry!=$storage['shares'][$id]){
+                                $dirty_flag=false;
+                                $normalized=share_normalize_entry($id,$entry,$dirty_flag);
+                                if ($normalized){
+                                        $storage['shares'][$id]=$normalized;
+                                        save_folder_share($storage);
+                                        return $storage['shares'][$id];
+                                }
+
+                                unset($storage['shares'][$id]);
+                                save_folder_share($storage);
+                                return null;
+                        }
+
+                        return $storage['shares'][$id];
+                }
+
+                if (!$path){
+                        $path=id2file($id);
+                }
+
+                if (!$path||(!is_dir($path)&&!is_file($path))){
+                        return null;
+                }
+
+                if (!$owner){
+                        $owner=return_owner($id);
+                }
+
+                if (!$owner){
+                        return null;
+                }
+
+                $storage['shares'][$id]=array(
+                        'owner'=>$owner,
+                        'path'=>$path,
+                        'token'=>share_new_token(),
+                        'created_at'=>time(),
+                        'expires_at'=>null,
+                        'recipients'=>array(),
+                        'active'=>true,
+                );
+
+                save_folder_share($storage);
+
+                return $storage['shares'][$id];
+        }
+
+        function share_public_path($id,$entry=null){
+                if (!is_string($id)||$id===''){
+                        return null;
+                }
+
+                if ($entry===null){
+                        $storage=load_folder_share();
+                        $entry=$storage['shares'][$id]??null;
+                }
+
+                if (empty($entry)||!is_array($entry)){
+                        return null;
+                }
+
+                if (empty($entry['token'])||!is_string($entry['token'])){
+                        return null;
+                }
+
+                return 'index.php?share='.$id.'&t='.$entry['token'];
+        }
+
+        function share_revoke(string $id): bool{
+                $storage=load_folder_share();
+                if (empty($storage['shares'][$id])){
+                        return false;
+                }
+
+                $entry=$storage['shares'][$id];
+                $entry['active']=false;
+                $entry['token']=null;
+                $storage['shares'][$id]=$entry;
+                save_folder_share($storage);
+
+                return true;
+        }
+
+        function share_regenerate(string $id): ?array{
+                $storage=load_folder_share();
+                if (empty($storage['shares'][$id])){
+                        $existing=share_ensure_entry($id);
+                        if (empty($existing)){
+                                return null;
+                        }
+                        $storage=load_folder_share();
+                }
+
+                $entry=$storage['shares'][$id];
+                $path=$entry['path'];
+                if (!$path||(!is_dir($path)&&!is_file($path))){
+                        share_revoke($id);
+                        return null;
+                }
+
+                $owner=$entry['owner'];
+                share_revoke($id);
+                removeID($id);
+                $new_id=addID($path);
+                $storage=load_folder_share();
+                $revoked=$storage['shares'][$id]??null;
+                if (empty($revoked)){
+                        return null;
+                }
+
+                $revoked['token']=share_new_token();
+                $revoked['active']=true;
+                $revoked['created_at']=time();
+                $revoked['owner']=$owner;
+                $revoked['path']=$path;
+                $storage['shares'][$new_id]=$revoked;
+                save_folder_share($storage);
+
+                $revoked['id']=$new_id;
+                return $revoked;
+        }
+
 	function save_users_rights($array=null){return save($_SESSION['users_rights_file'],$array);}
 	function load_users_rights(){return load($_SESSION['users_rights_file']);}
 	function save_config($array=null){if (!$array){$array=$_SESSION['config'];}return save($_SESSION['config_file'],$array);}

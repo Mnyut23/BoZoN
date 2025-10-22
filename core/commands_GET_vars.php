@@ -65,11 +65,58 @@
                 send_json($tree);
         }
 
-	# public share request
-	if (!empty($_GET['f'])){
-		require('core/share.php');	
-		exit;
-	}
+                $share_path=$ids[$share_id];
+                $storage=load_folder_share();
+                $entry=$storage['shares'][$share_id]??share_ensure_entry($share_id,return_owner($share_id),$share_path);
+                $storage=load_folder_share();
+                $entry=$storage['shares'][$share_id]??null;
+
+                if (!$entry || !share_is_active($entry) || !is_string($token) || $token==='' || !hash_equals($entry['token'],$token)){
+                        send_json(array(),404);
+                }
+
+                if (!is_file($share_path) && !is_dir($share_path)){
+                        send_json(array(),410);
+                }
+
+                $tree=array();
+                if (is_dir($share_path)){
+                        $content=folder_content($share_path);
+                        if (is_array($content)){
+                                foreach($content as $id=>$path){
+                                        $child_entry=share_ensure_entry($id,return_owner($id),$path);
+                                        $storage=load_folder_share();
+                                        $child=$storage['shares'][$id]??$child_entry;
+                                        if (!$child || empty($child['token'])){
+                                                continue;
+                                        }
+
+                                        $tree[$id]=array(
+                                                'path'=>$path,
+                                                'url'=>ROOT.'index.php?share='.$id.'&t='.$child['token'],
+                                                'type'=>(is_dir($path)?'folder':'file')
+                                        );
+                                }
+                        }
+                }else{
+                        $tree=array(
+                                $share_id=>array(
+                                        'path'=>$share_path,
+                                        'url'=>ROOT.'index.php?share='.$share_id.'&t='.$entry['token'],
+                                        'type'=>(is_dir($share_path)?'folder':'file')
+                                )
+                        );
+                }
+
+                store_access_stat($share_path,$share_id);
+                send_json($tree);
+        }
+
+        # public share request
+        if (!empty($_GET['share'])||!empty($_GET['f'])){
+                require('core/share.php');
+                exit;
+        }
 
 	# Try to login or logout ? => auto_restrict
 	if (!empty($_POST['pass'])&&!empty($_POST['login'])||isset($_GET['logout'])||isset($_GET['deconnexion'])){
@@ -90,15 +137,26 @@
 		$stats=load($_SESSION['stats_file']);
 		for ($index=0;$index<conf('stats_max_lines');$index++){
 			if (!empty($stats[$index])){
-				$rss['items'][]=
-				array(
-					'title'=>$stats[$index]['file'],
-					'description'=>'[ip:'.$stats[$index]['ip'].'] '.'[referrer:'.$stats[$index]['referrer'].'] '.'[host:'.$stats[$index]['host'].'] ',
-					'pubDate'=>makeRSSdate($stats[$index]['date']),
-					'link'=>$_SESSION['home'].'?f='.$stats[$index]['id'],
-					'guid'=>$_SESSION['home'].'?f='.$stats[$index]['id'],
-				);
-			}
+                                $stat_id=$stats[$index]['id'];
+                                $share_link=$_SESSION['home'].'?share='.$stat_id;
+                                if (!empty($ids[$stat_id])){
+                                        $entry=share_ensure_entry($stat_id,return_owner($stat_id),$ids[$stat_id]);
+                                        $storage=load_folder_share();
+                                        $entry=$storage['shares'][$stat_id]??$entry;
+                                        if ($entry && !empty($entry['token'])){
+                                                $share_link=$_SESSION['home'].'?share='.$stat_id.'&t='.$entry['token'];
+                                        }
+                                }
+
+                                $rss['items'][]=
+                                array(
+                                        'title'=>$stats[$index]['file'],
+                                        'description'=>'[ip:'.$stats[$index]['ip'].'] '.'[referrer:'.$stats[$index]['referrer'].'] '.'[host:'.$stats[$index]['host'].'] ',
+                                        'pubDate'=>makeRSSdate($stats[$index]['date']),
+                                        'link'=>$share_link,
+                                        'guid'=>$share_link,
+                                );
+                        }
 		}
 		array2feed($rss);
 		exit;
@@ -149,18 +207,25 @@
 		}
 		
 		# users share list request
-		if (isset($_GET['users_share_list'])){
-			$shared_id=$_GET['users_share_list'];
-			require_once('core/auto_restrict.php');
-			$shared_with=load_folder_share();
-			$users=$auto_restrict['users'];
-			unset($users[$_SESSION['login']]);
-			foreach($users as $login=>$data){
-				# creates a checkbox list of users (if the folder is already shared by logged user, checked)
-				if (isset($shared_with[$login][$shared_id]) && $shared_with[$login][$shared_id]['from']==$_SESSION['login']){
-					$check=' checked ';$class=' class="shared" ';
-				}else{$check='';$class='';}
-				echo '<li><input type="checkbox" '.$class.' id="check_'.$login.'" value="'.$login.'" name="users[]"'.$check.'><label for="check_'.$login.'">'.$login.'</label></li>';
+                if (isset($_GET['users_share_list'])){
+                        $shared_id=$_GET['users_share_list'];
+                        require_once('core/auto_restrict.php');
+                        $storage=load_folder_share();
+                        $entry=$storage['shares'][$shared_id]??null;
+                        $selected=array();
+                        if (!empty($entry['owner'])&&$entry['owner']===$_SESSION['login']&&!empty($entry['recipients'])&&is_array($entry['recipients'])){
+                                foreach ($entry['recipients'] as $recipient){
+                                        $selected[$recipient]=true;
+                                }
+                        }
+                        $users=$auto_restrict['users'];
+                        unset($users[$_SESSION['login']]);
+                        foreach($users as $login=>$data){
+                                # creates a checkbox list of users (if the folder is already shared by logged user, checked)
+                                if (isset($selected[$login])){
+                                        $check=' checked ';$class=' class="shared" ';
+                                }else{$check='';$class='';}
+                                echo '<li><input type="checkbox" '.$class.' id="check_'.$login.'" value="'.$login.'" name="users[]"'.$check.'><label for="check_'.$login.'">'.$login.'</label></li>';
 			}		
 			exit;
 		}
