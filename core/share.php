@@ -124,15 +124,15 @@
 						require(THEME_PATH.'/footer.php');
 					}else{
 						# json format of a shared folder (but not for a locked one)
-						if (isset($_GET['json']) && !empty($tree)  && strlen($id)<=23){
-							$upload_path_size=strlen($_SESSION['upload_root_path']);
-							foreach ($tree as $branch){
-								$id_tree[file2id($branch)]=$branch;
-							}
-							# burn access ?
-							burned($id);
-							exit(json_encode($id_tree)); 
-						}
+                                                if (isset($_GET['json']) && !empty($tree)  && strlen($id)<=23){
+                                                        $upload_path_size=strlen($_SESSION['upload_root_path']);
+                                                        foreach ($tree as $branch){
+                                                                $id_tree[file2id($branch)]=$branch;
+                                                        }
+                                                        # burn access ?
+                                                        burned($id);
+                                                        send_json($id_tree);
+                                                }
 
 						# RSS format of a shared folder (but not for a locked one)
 						if (isset($_GET['rss']) && !empty($tree)  && strlen($id)<=23){
