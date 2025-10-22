@@ -17,34 +17,45 @@
 		$_SESSION['filter']='';
 	}
 
-	if (isset($_GET['kill']) && file_exists($_SESSION['stats_file'])){
-		$stats=array();
-		file_put_contents($_SESSION['stats_file'],'<?php /* '.base64_encode(gzdeflate(serialize($stats))).' */ ?>');
+        if (isset($_GET['kill']) && file_exists($_SESSION['stats_file'])){
+                save($_SESSION['stats_file'],array());
 
-	}
-	if (!empty($_GET['start'])){$from=$_GET['start'];}
-	$stats=(file_exists($_SESSION['stats_file']) ? unserialize(gzinflate(base64_decode(substr(file_get_contents($_SESSION['stats_file']),9,-strlen(6))))) : array() );
+        }
+        if (!empty($_GET['start'])){$from=$_GET['start'];}
+        $stats=(file_exists($_SESSION['stats_file']) ? load($_SESSION['stats_file']) : array());
 	$stats=array_reverse($stats);
 	if (empty($stats)){
     $message=e('No stats',false);
   }
 	else{
-		for ($index=$from;$index<$from+conf('stats_max_lines');$index++){//($stats as $client){
-			if (!empty($stats[$index])){
-				if (empty($stats[$index]['access'])){$stats[$index]['access']='-';}
-				$log_list.='
-				<tr>
-					<td class="date">'.date("d/m/Y, H:i:s", strtotime($stats[$index]['date'])).'</td>
-					<td class="file">'.$stats[$index]['file'].' ('.$stats[$index]['id'].')</td>
-					<td class="owner">'.return_owner($stats[$index]['id']).'</td>
-					<td class="ip">'.$stats[$index]['ip'].'</td>
-					<td class="ip">'.$stats[$index]['access'].'</td>
-					<td class="origin">'.$stats[$index]['referrer'].'</td>
-					<td class="host">'.$stats[$index]['host'].'</td>
-				</tr>';
-			}
-		}
-	}
+                for ($index=$from;$index<$from+conf('stats_max_lines');$index++){//($stats as $client){
+                        if (!empty($stats[$index])){
+                                if (empty($stats[$index]['access'])){$stats[$index]['access']='-';}
+                                $entry=$stats[$index];
+                                $raw_date=$entry['date'] ?? '';
+                                $timestamp=strtotime($raw_date);
+                                $formatted_date=($timestamp!==false ? date("d/m/Y, H:i:s", $timestamp) : $raw_date);
+                                $date_label=htmlspecialchars($formatted_date, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                                $file_label=htmlspecialchars(($entry['file'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                                $id_label=htmlspecialchars(($entry['id'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                                $owner_label=htmlspecialchars(return_owner($entry['id'] ?? null) ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                                $ip_label=htmlspecialchars(($entry['ip'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                                $access_label=htmlspecialchars(($entry['access'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                                $referrer_label=htmlspecialchars(($entry['referrer'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                                $host_label=htmlspecialchars(($entry['host'] ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                                $log_list.='
+                                <tr>
+                                        <td class="date">'.$date_label.'</td>
+                                        <td class="file">'.$file_label.' ('.$id_label.')</td>
+                                        <td class="owner">'.$owner_label.'</td>
+                                        <td class="ip">'.$ip_label.'</td>
+                                        <td class="ip">'.$access_label.'</td>
+                                        <td class="origin">'.$referrer_label.'</td>
+                                        <td class="host">'.$host_label.'</td>
+                                </tr>';
+                        }
+                }
+        }
 	$t=returnToken();
 	if (!empty($stats[$from+conf('stats_max_lines')])){
 		$start=$from+conf('stats_max_lines');

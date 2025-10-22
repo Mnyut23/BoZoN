@@ -186,8 +186,65 @@ Deny from all
 	#################################################
 	# Data save/load & files
 	#################################################
-	function load($file){return (file_exists($file) ? unserialize(gzinflate(base64_decode(substr(file_get_contents($file),9,-strlen(6))))) : array() );}
-	function save($file,$data){return file_put_contents($file, '<?php /* '.base64_encode(gzdeflate(serialize($data))).' */ ?>');}
+        function load($file){
+                if (!is_file($file)){
+                        return array();
+                }
+
+                $raw=file_get_contents($file);
+                if ($raw===false){
+                        return array();
+                }
+
+                if (strncmp($raw,'<?php /* ',9)!==0 || substr($raw,-6)!==' */ ?>'){
+                        return array();
+                }
+
+                $payload=substr($raw,9,-6);
+                if ($payload===false || $payload===''){
+                        return array();
+                }
+
+                $decoded=base64_decode($payload,true);
+                if ($decoded===false || $decoded===''){
+                        return array();
+                }
+
+                if (strlen($decoded)>10485760){
+                        return array();
+                }
+
+                $inflated=@gzinflate($decoded);
+                if ($inflated===false || $inflated===''){
+                        return array();
+                }
+
+                try{
+                        $data=@unserialize($inflated,array('allowed_classes'=>false));
+                }catch(\Throwable $exception){
+                        return array();
+                }
+
+                return (is_array($data)?$data:array());
+        }
+        function save($file,$data){
+                if (!is_array($data)){
+                        return false;
+                }
+
+                $serialized=serialize($data);
+                $compressed=gzdeflate($serialized);
+                if ($compressed===false){
+                        return false;
+                }
+
+                $encoded=base64_encode($compressed);
+                if ($encoded===false){
+                        return false;
+                }
+
+                return file_put_contents($file,'<?php /* '.$encoded.' */ ?>',LOCK_EX);
+        }
 	function store($ids=null){if (!$ids){return false;}natcasesort($ids);return save($_SESSION['id_file'],$ids);}
 	function unstore(){return array_filter(load($_SESSION['id_file']));}
 	function save_folder_share($array=null){return save($_SESSION['folder_share_file'],$array);}
@@ -259,35 +316,89 @@ Deny from all
 	} 
 
 	# store all client access to a file
-	function store_access_stat($file=null,$id=null){
-		if (!$file||!$id){return false;}
-		$host=$ref='&#8709;';
-		if (isset($_SERVER['REMOTE_HOST'])){$host=$_SERVER['REMOTE_HOST'];}
-		if (isset($_SERVER['HTTP_REFERER'])){$ref=$_SERVER['HTTP_REFERER'];}
-		if (isset($_GET['rss'])){$access='RSS';}
-		elseif (isset($_GET['json'])){$access='Json';}
-		elseif (isset($_GET['export'])){$access='Export';}
-		else{$access='Website';}
+        function encode_json($value){
+                $flags=JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE;
+                if (defined('JSON_INVALID_UTF8_SUBSTITUTE')){
+                        $flags|=JSON_INVALID_UTF8_SUBSTITUTE;
+                }
+                if (defined('JSON_THROW_ON_ERROR')){
+                        $flags|=JSON_THROW_ON_ERROR;
+                }
 
-		$data=array(
-			'ip'=>$_SERVER['REMOTE_ADDR'],
-			'host'=>$host,
-			'referrer'=>$ref,
-			'date'=>date('D d M, H:i:s'),
-			'file'=>$file,
-			'id'=>$id,
-			'access'=>$access
-		);
-		
-		$stats=load($_SESSION['stats_file']);
-		if (!is_array($stats)){$stats=array();}
-		if (count($stats)>conf('stats_max_entries')){
-			$stats=array_values($stats);
-			unset($stats[0]);
-		}
-		$stats[]=$data;
-		save($_SESSION['stats_file'], $stats);
-	}
+                try{
+                        $json=json_encode($value,$flags);
+                }catch(\Throwable $exception){
+                        return '[]';
+                }
+
+                if ($json===false){
+                        return '[]';
+                }
+
+                return $json;
+        }
+        function send_json($payload=array(),$status=200){
+                if (!is_int($status) || $status<100 || $status>599){
+                        $status=200;
+                }
+
+                if (!headers_sent()){
+                        http_response_code($status);
+                        header('Content-Type: application/json; charset=utf-8');
+                }
+
+                exit(encode_json($payload));
+        }
+        function store_access_stat($file=null,$id=null){
+                if (!is_string($file)||$file===''){return false;}
+                if (!is_string($id)||$id===''){return false;}
+
+                $host='&#8709;';
+                if (isset($_SERVER['REMOTE_HOST'])&&$_SERVER['REMOTE_HOST']!==''){
+                        $host=substr(strip_tags((string)$_SERVER['REMOTE_HOST']),0,255);
+                }
+
+                $ref='&#8709;';
+                if (isset($_SERVER['HTTP_REFERER'])&&$_SERVER['HTTP_REFERER']!==''){
+                        $ref=substr(strip_tags((string)$_SERVER['HTTP_REFERER']),0,2048);
+                }
+
+                if (isset($_GET['rss'])){$access='RSS';}
+                elseif (isset($_GET['json'])){$access='Json';}
+                elseif (isset($_GET['export'])){$access='Export';}
+                else{$access='Website';}
+
+                $ip='0.0.0.0';
+                if (isset($_SERVER['REMOTE_ADDR'])){
+                        $candidate=(string)$_SERVER['REMOTE_ADDR'];
+                        $zone=strpos($candidate,'%');
+                        if ($zone!==false){$candidate=substr($candidate,0,$zone);}
+                        if (filter_var($candidate,FILTER_VALIDATE_IP)!==false){
+                                $ip=$candidate;
+                        }
+                }
+
+                $data=array(
+                        'ip'=>$ip,
+                        'host'=>$host,
+                        'referrer'=>$ref,
+                        'date'=>date('D d M, H:i:s'),
+                        'file'=>$file,
+                        'id'=>$id,
+                        'access'=>$access
+                );
+
+                $stats=load($_SESSION['stats_file']);
+                if (!is_array($stats)){$stats=array();}
+
+                $stats[]=$data;
+                $limit=(int)conf('stats_max_entries');
+                if ($limit>0 && count($stats)>$limit){
+                        $stats=array_slice($stats,-$limit);
+                }
+
+                save($_SESSION['stats_file'], $stats);
+        }
 	function addslash_if_needed($chaine){
 		if (substr($chaine,strlen($chaine)-1,1)!='/'&&!empty($chaine)){return $chaine.'/';}else{return $chaine;}
 	}
@@ -993,14 +1104,26 @@ Deny from all
 		}else{return false;}
 	}
 
-        function navigatorLanguage(){
-                if (!empty($_SERVER['HTTP_ACCEPT_LANGUAGE'])){
-                        $language = $_SERVER['HTTP_ACCEPT_LANGUAGE'];
-                        $code = substr($language, 0, 2);
-                        if ($code !== false && strlen($code) === 2){return $code;}
-                }
-                return 'fr';
-        }
+function navigatorLanguage() {
+    // Hole Header; Fallback leer
+    $h = $_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? '';
+
+    // Wenn nichts Sinnvolles: Default
+    if (!is_string($h) || $h === '') {
+        return 'fr';
+    }
+
+    // Kürze auf 2er Sprachcode
+    $code = substr($h, 0, 2);
+
+    // Defensive Checks
+    if ($code === false || strlen($code) < 2) {
+        return 'fr';
+    }
+
+    return strtolower($code);
+}
+
 
 
 
