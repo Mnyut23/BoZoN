@@ -34,25 +34,57 @@ if ($mode=='links'){
   echo template('dialog_password',$array);
 }
 if ($mode=='view'){
-  # Add shares from others users 
-  $shared_with=load_folder_share();
-  if (!empty($shared_with[$_SESSION['login']])){
-    //$shared_folders.= '<div class="shared_folders">';
+  # Add shares from others users
+  $shared_storage=load_folder_share();
+  if (!empty($shared_storage['shares'])){
     $saveshare=false;
-    foreach($shared_with[$_SESSION['login']] as $id=>$data){
-      if (is_dir($data['folder'])&&!empty($ids[$id])){
-        $folder=_basename($data['folder']);
+    foreach($shared_storage['shares'] as $id=>$entry){
+      if (!share_is_active($entry)){
+        continue;
+      }
+      if (empty($entry['token'])||!is_string($entry['token'])){
+        continue;
+      }
+      if (empty($entry['recipients'])||!in_array($_SESSION['login'],$entry['recipients'],true)){
+        continue;
+      }
+
+      $path=$entry['path'];
+      if (!is_string($path)||$path===''){
+        unset($shared_storage['shares'][$id]);
+        $saveshare=true;
+        continue;
+      }
+
+      if (empty($ids[$id])){
+        unset($shared_storage['shares'][$id]);
+        $saveshare=true;
+        continue;
+      }
+
+      if (!is_file($path) && !is_dir($path)){
+        unset($shared_storage['shares'][$id]);
+        $saveshare=true;
+        continue;
+      }
+
+      $share_link='index.php?share='.$id.'&t='.$entry['token'];
+
+      if (is_dir($path)){
+        $folder=_basename($path);
         $array=array(
           '#CLASS'      => 'shared_folder',
           '#ID'         => $id,
           '#FICHIER'    => $folder,
           '#TOKEN'      => TOKEN,
           '#NAME'       => $folder,
-          '#FROM'       => $data['from'],
+          '#FROM'       => $entry['owner'],
+          '#SHARE_URL'  => htmlspecialchars($share_link,ENT_QUOTES,'UTF-8'),
+          '#SHARE_TOKEN'=> htmlspecialchars($entry['token'],ENT_QUOTES,'UTF-8'),
         );
         $shared_folders.= template($mode.'_shared_folder_'.$layout,$array);
-      }elseif (is_file($data['folder'])&&!empty($ids[$id])){
-        $file=_basename($data['folder']);
+      }elseif (is_file($path)){
+        $file=_basename($path);
         $extension=strtolower(pathinfo($file,PATHINFO_EXTENSION));
         $array=array(
           '#CLASS'      => 'shared_folder',
@@ -60,18 +92,17 @@ if ($mode=='view'){
           '#FICHIER'    => $file,
           '#TOKEN'      => TOKEN,
           '#NAME'       => $file,
-          '#FROM'       => $data['from'],
+          '#FROM'       => $entry['owner'],
           '#EXTENSION'  => $extension,
+          '#SHARE_URL'  => htmlspecialchars($share_link,ENT_QUOTES,'UTF-8'),
+          '#SHARE_TOKEN'=> htmlspecialchars($entry['token'],ENT_QUOTES,'UTF-8'),
         );
         $shared_folders.= template($mode.'_shared_file_'.$layout,$array);
-      }else{
-        # remove obsolete shared IDs
-        unset($shared_with[$_SESSION['login']][$id]);
-        $saveshare=true;
       }
     }
-    //$shared_folders.= '</div>';
-    save_folder_share($shared_with);
+    if ($saveshare){
+      save_folder_share($shared_storage);
+    }
   }
 
   # Prepare folder tree for move dialog box
@@ -219,7 +250,11 @@ if ($mode=='view'){
     // Click on link button
     on('click','#list_files a.link',function(){
       fileid=attr(this,"data-id");
-      document.getElementById('link').value="<?php echo $_SESSION['home'];?>?f="+fileid;
+      token=attr(this,"data-token");
+      if(!token){token='';}
+      shareLink="<?php echo $_SESSION['home'];?>?share="+fileid;
+      if(token){shareLink+='&t='+token;}
+      document.getElementById('link').value=shareLink;
     });
     // Click on usershare button
     on('click','#list_files a.usershare',function(){
@@ -236,8 +271,10 @@ if ($mode=='view'){
     });
     // Click on qrcode button
     on('click','#list_files a.qrcode',function(){
-      fileid=attr(this,"data-id");     
-      var data = "<?php echo $_SESSION['home'];?>?f="+fileid;
+      fileid=attr(this,"data-id");
+      token=attr(this,"data-token");
+      if(!token){token='';}
+      var data = "<?php echo $_SESSION['home'];?>?share="+fileid+(token?'&t='+token:'');
       var options = {ecclevel:'M'};
       var url = QRCode.generatePNG(data, options);
       document.getElementById('qrcode_img').src = url;

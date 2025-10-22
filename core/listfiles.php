@@ -66,19 +66,30 @@ if (count($liste)>0){
 
 			$extension=strtolower(pathinfo($fichier,PATHINFO_EXTENSION));
 			if (!conf('click_on_link_to_download')){$target='target="_BLANK"';}else{$target=null;}
-			# create item for file or folder
-			$fichier_short=substr($fichier,$upload_path_size);
+                        # create item for file or folder
+                        $fichier_short=substr($fichier,$upload_path_size);
+                        $share_entry=share_ensure_entry($id,return_owner($id),$fichier);
+                        $share_token='';
+                        if (!empty($share_entry['token'])&&is_string($share_entry['token'])){
+                                $share_token=$share_entry['token'];
+                        }
+                        $share_url='index.php?share='.$id;
+                        if ($share_token!==''){
+                                $share_url.='&t='.$share_token;
+                        }
+                        $share_href=htmlentities($share_url,ENT_QUOTES,'UTF-8');
+                        $share_token_attr=htmlentities($share_token,ENT_QUOTES,'UTF-8');
 			# adding view icon if needed
-			if (is_in($extension,'FILES_TO_RETURN')!==false){
-				if ($extension=='jpg'||$extension=='jpeg'||$extension=='gif'||$extension=='png'||$extension=='svg'){
-					if (conf('use_lightbox')){
-						$icone_visu='<a class="visu" data-type="lightbox" data-group="lb" href="index.php?f='.$id.'" title="'.e('View this share',false).'" alt="'.$nom.'"><span class="icon-eye" ></span></a>';
-					}else{
-						$icone_visu='<a class="visu" target="_BLANK" href="index.php?f='.$id.'" title="'.e('View this share',false).'"><span class="icon-eye" ></span></a>';
-					}
-				}else{
-					$icone_visu='<a class="visu" target="_BLANK" href="index.php?f='.$id.'" title="'.e('View this file',false).'"><span class="icon-eye" ></span></a>';
-				}
+                        if (is_in($extension,'FILES_TO_RETURN')!==false){
+                                if ($extension=='jpg'||$extension=='jpeg'||$extension=='gif'||$extension=='png'||$extension=='svg'){
+                                        if (conf('use_lightbox')){
+                                                $icone_visu='<a class="visu" data-type="lightbox" data-group="lb" href="'.$share_href.'" title="'.e('View this share',false).'" alt="'.$nom.'"><span class="icon-eye" ></span></a>';
+                                        }else{
+                                                $icone_visu='<a class="visu" target="_BLANK" href="'.$share_href.'" title="'.e('View this share',false).'"><span class="icon-eye" ></span></a>';
+                                        }
+                                }else{
+                                        $icone_visu='<a class="visu" target="_BLANK" href="'.$share_href.'" title="'.e('View this file',false).'"><span class="icon-eye" ></span></a>';
+                                }
 			}else{$icone_visu='';}
 
 			# adding edit icon if needed
@@ -95,9 +106,9 @@ if (count($liste)>0){
 			if (is_dir($fichier)){		
 				# Item is a folder
 				$current_tree=tree($fichier,null,false,false,$tree);
-				if (only_type($current_tree,'.jpg .jpeg .gif .png') || only_type($current_tree,'.mp3 .ogg .wav')||only_type($fichier,'.jpg .jpeg .gif .png') || only_type($fichier,'.mp3 .ogg .wav')){
-					$icone_visu='<a class="visu" href="index.php?f='.$id.'" title="'.e('View this share',false).'"><span class="icon-eye"></span></a>';
-				}			
+                                if (only_type($current_tree,'.jpg .jpeg .gif .png') || only_type($current_tree,'.mp3 .ogg .wav')||only_type($fichier,'.jpg .jpeg .gif .png') || only_type($fichier,'.mp3 .ogg .wav')){
+                                        $icone_visu='<a class="visu" href="'.$share_href.'" title="'.e('View this share',false).'"><span class="icon-eye"></span></a>';
+                                }
 				if (conf('allow_folder_size_stat')){$taille=folder_size($fichier);}else{$taille='';}
 				
 				$array=array(
@@ -115,6 +126,8 @@ if (count($liste)>0){
 					'#ICONE_VISU'		=> $icone_visu,
 					'#SLASHEDNAME'		=> addslashes($nom),
 					'#SLASHEDFICHIER'	=> addslashes($fichier_short),
+					'#SHARE_URL'			=> $share_href,
+					'#SHARE_TOKEN'		=> $share_token_attr,
 				);
 				$folderlist.= template($mode.'_folder_'.$layout,$array);
 				$current_tree='';
@@ -139,6 +152,8 @@ if (count($liste)>0){
 					'#SLASHEDNAME'		=> addslashes($nom),
 					'#SLASHEDFICHIER'	=> addslashes($fichier_short),
 					'#USERSHAREBUTTON'	=> $icone_share,
+					'#SHARE_URL'			=> $share_href,
+					'#SHARE_TOKEN'		=> $share_token_attr,
 				);
 				$filelist.= template($mode.'_image_'.$layout,$array);
 			}elseif (is_file($fichier) && $extension=='zip' && $_SESSION['zip']){
@@ -163,6 +178,8 @@ if (count($liste)>0){
 					'#SLASHEDNAME'		=> addslashes($nom),
 					'#USERSHAREBUTTON'	=> $icone_share,
 					'#SLASHEDFICHIER'	=> addslashes($fichier_short),
+					'#SHARE_URL'			=> $share_href,
+					'#SHARE_TOKEN'		=> $share_token_attr,
 				);
 				$filelist.= template($mode.'_file_'.$layout,$array);
 			}elseif (is_file($fichier)){
@@ -187,6 +204,8 @@ if (count($liste)>0){
 					'#SLASHEDNAME'		=> addslashes($nom),
 					'#USERSHAREBUTTON'	=> $icone_share,
 					'#SLASHEDFICHIER'	=> addslashes($fichier_short),
+					'#SHARE_URL'			=> $share_href,
+					'#SHARE_TOKEN'		=> $share_token_attr,
 				);
 				$filelist.= template($mode.'_file_'.$layout,$array);
 				chrono('fichier:'.$nom);

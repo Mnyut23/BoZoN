@@ -186,12 +186,485 @@ Deny from all
 	#################################################
 	# Data save/load & files
 	#################################################
-	function load($file){return (file_exists($file) ? unserialize(gzinflate(base64_decode(substr(file_get_contents($file),9,-strlen(6))))) : array() );}
-	function save($file,$data){return file_put_contents($file, '<?php /* '.base64_encode(gzdeflate(serialize($data))).' */ ?>');}
+        function load($file){
+                if (!is_file($file)){
+                        return array();
+                }
+
+                $raw=file_get_contents($file);
+                if ($raw===false){
+                        return array();
+                }
+
+                if (strncmp($raw,'<?php /* ',9)!==0 || substr($raw,-6)!==' */ ?>'){
+                        return array();
+                }
+
+                $payload=substr($raw,9,-6);
+                if ($payload===false || $payload===''){
+                        return array();
+                }
+
+                $decoded=base64_decode($payload,true);
+                if ($decoded===false || $decoded===''){
+                        return array();
+                }
+
+                if (strlen($decoded)>10485760){
+                        return array();
+                }
+
+                $inflated=@gzinflate($decoded);
+                if ($inflated===false || $inflated===''){
+                        return array();
+                }
+
+                try{
+                        $data=@unserialize($inflated,array('allowed_classes'=>false));
+                }catch(\Throwable $exception){
+                        return array();
+                }
+
+                return (is_array($data)?$data:array());
+        }
+        function save($file,$data){
+                if (!is_array($data)){
+                        return false;
+                }
+
+                $serialized=serialize($data);
+                $compressed=gzdeflate($serialized);
+                if ($compressed===false){
+                        return false;
+                }
+
+                $encoded=base64_encode($compressed);
+                if ($encoded===false){
+                        return false;
+                }
+
+                return file_put_contents($file,'<?php /* '.$encoded.' */ ?>',LOCK_EX);
+        }
 	function store($ids=null){if (!$ids){return false;}natcasesort($ids);return save($_SESSION['id_file'],$ids);}
 	function unstore(){return array_filter(load($_SESSION['id_file']));}
-	function save_folder_share($array=null){return save($_SESSION['folder_share_file'],$array);}
-	function load_folder_share(){return load($_SESSION['folder_share_file']);}
+        function share_storage_defaults(){
+                return array('shares'=>array());
+        }
+
+        function save_folder_share($array=null){
+                if (!is_array($array)){
+                        $array=share_storage_defaults();
+                }
+
+                if (empty($array['shares'])||!is_array($array['shares'])){
+                        $array['shares']=array();
+                }
+
+                $result=save($_SESSION['folder_share_file'],$array);
+                load_folder_share(true);
+
+                return $result;
+        }
+
+        function load_folder_share($force_refresh=false){
+                static $cache=null;
+
+                if ($force_refresh){
+                        $cache=null;
+                }
+
+                if ($cache!==null){
+                        return $cache;
+                }
+
+                $raw=load($_SESSION['folder_share_file']);
+                if (!is_array($raw)){
+                        $raw=share_storage_defaults();
+                }
+
+                $dirty=false;
+                $normalized=share_storage_normalize($raw,$dirty);
+
+                if ($dirty){
+                        save($_SESSION['folder_share_file'],$normalized);
+                        $cache=$normalized;
+                        return $cache;
+                }
+
+                $cache=$normalized;
+                return $cache;
+        }
+
+        function share_storage_normalize($raw,&$dirty){
+                $dirty=false;
+
+                if (!isset($raw['shares'])||!is_array($raw['shares'])){
+                        $converted=array();
+                        foreach ($raw as $recipient=>$items){
+                                if (!is_array($items)){
+                                        continue;
+                                }
+
+                                foreach ($items as $id=>$entry){
+                                        if (!is_string($id)||$id===''){
+                                                $dirty=true;
+                                                continue;
+                                        }
+
+                                        if (!isset($converted[$id])){
+                                                $converted[$id]=array(
+                                                        'owner'=>(isset($entry['owner'])&&is_string($entry['owner']))?$entry['owner']:'',
+                                                        'path'=>(isset($entry['path'])&&is_string($entry['path']))?$entry['path']:(isset($entry['folder'])&&is_string($entry['folder'])?$entry['folder']:''),
+                                                        'token'=>null,
+                                                        'created_at'=>time(),
+                                                        'expires_at'=>null,
+                                                        'recipients'=>array(),
+                                                        'active'=>true,
+                                                );
+                                        }
+
+                                        if (!empty($entry['from'])&&is_string($entry['from'])&&$converted[$id]['owner']===''){
+                                                $converted[$id]['owner']=$entry['from'];
+                                        }
+
+                                        if (!empty($recipient)&&is_string($recipient)){
+                                                $converted[$id]['recipients'][]=$recipient;
+                                        }
+                                }
+                        }
+
+                        $raw=array('shares'=>$converted);
+                        $dirty=true;
+                }
+
+                $normalized=array('shares'=>array());
+                foreach ($raw['shares'] as $id=>$entry){
+                        if (!is_string($id)||$id===''){
+                                $dirty=true;
+                                continue;
+                        }
+
+                        $normalized_entry=share_normalize_entry($id,$entry,$dirty);
+                        if ($normalized_entry){
+                                $normalized['shares'][$id]=$normalized_entry;
+                        }else{
+                                $dirty=true;
+                        }
+                }
+
+                return $normalized;
+        }
+
+        function share_normalize_entry($id,$entry,&$dirty){
+                if (!is_array($entry)){
+                        $dirty=true;
+                        return null;
+                }
+
+                $path=id2file($id);
+                if (!$path||(!is_dir($path)&&!is_file($path))){
+                        if (!empty($entry['path'])&&is_string($entry['path'])&&(is_dir($entry['path'])||is_file($entry['path']))){
+                                $path=$entry['path'];
+                        }else{
+                                return null;
+                        }
+                }
+
+                $owner=return_owner($id);
+                if (!$owner){
+                        if (!empty($entry['owner'])&&is_string($entry['owner'])){
+                                $owner=$entry['owner'];
+                        }elseif (!empty($entry['from'])&&is_string($entry['from'])){
+                                $owner=$entry['from'];
+                        }else{
+                                return null;
+                        }
+                }
+
+                $active=true;
+                if (isset($entry['active'])){
+                        $active=(bool)$entry['active'];
+                }else{
+                        $dirty=true;
+                }
+
+                $token=null;
+                if (!empty($entry['token'])&&is_string($entry['token'])){
+                        $token=$entry['token'];
+                }
+                if ($active){
+                        if (!$token){
+                                $token=share_new_token();
+                                $dirty=true;
+                        }
+                }else{
+                        if ($token!==null){
+                                $token=null;
+                                $dirty=true;
+                        }
+                }
+
+                $created=null;
+                if (isset($entry['created_at'])&&is_numeric($entry['created_at'])){
+                        $created=(int)$entry['created_at'];
+                }
+                if ($created===null||$created<=0){
+                        $created=time();
+                        $dirty=true;
+                }
+
+                $expires=null;
+                if (array_key_exists('expires_at',$entry)){
+                        if ($entry['expires_at']===null||$entry['expires_at']===''){
+                                $expires=null;
+                        }elseif (is_numeric($entry['expires_at'])){
+                                $expires=(int)$entry['expires_at'];
+                        }else{
+                                $dirty=true;
+                        }
+                }else{
+                        $dirty=true;
+                }
+
+                $recipients=array();
+                if (!empty($entry['recipients'])&&is_array($entry['recipients'])){
+                        foreach ($entry['recipients'] as $recipient){
+                                if (is_string($recipient)){
+                                        $recipient=trim($recipient);
+                                        if ($recipient!==''){
+                                                $recipients[$recipient]=true;
+                                        }
+                                }
+                        }
+                }
+
+                $normalized=array(
+                        'owner'=>(string)$owner,
+                        'path'=>$path,
+                        'token'=>$token,
+                        'created_at'=>$created,
+                        'expires_at'=>$expires,
+                        'recipients'=>array_keys($recipients),
+                        'active'=>$active,
+                );
+
+                if ($expires!==null&&$expires<=0){
+                        $normalized['expires_at']=null;
+                        $dirty=true;
+                }
+
+                return $normalized;
+        }
+
+        function share_is_expired($entry){
+                if (empty($entry)||!is_array($entry)){
+                        return true;
+                }
+
+                if (!empty($entry['expires_at'])&&is_int($entry['expires_at'])&&$entry['expires_at']>0){
+                        return $entry['expires_at']<time();
+                }
+
+                return false;
+        }
+
+        function share_is_active($entry){
+                if (empty($entry)||!is_array($entry)){
+                        return false;
+                }
+
+                if (share_is_expired($entry)){
+                        return false;
+                }
+
+                if (empty($entry['active'])){
+                        return false;
+                }
+
+                return !empty($entry['token'])&&is_string($entry['token']);
+        }
+
+        function share_new_token(): string{
+                try{
+                        return bin2hex(random_bytes(32));
+                }catch(\Throwable $exception){
+                        if (function_exists('openssl_random_pseudo_bytes')){
+                                $bytes=openssl_random_pseudo_bytes(32);
+                                if ($bytes!==false){
+                                        return bin2hex($bytes);
+                                }
+                        }
+
+                        return bin2hex(pack('d',microtime(true)).pack('V',mt_rand()));
+                }
+        }
+
+        function share_ensure_entry($id,$owner=null,$path=null){
+                if (!is_string($id)||$id===''){
+                        return null;
+                }
+
+                $storage=load_folder_share();
+                if (!empty($storage['shares'][$id])){
+                        $entry=$storage['shares'][$id];
+                        if (empty($entry['path'])||!is_string($entry['path'])){
+                                $entry['path']=id2file($id);
+                        }
+                        if ($owner&&empty($entry['owner'])){
+                                $entry['owner']=$owner;
+                        }
+                        if ($entry!=$storage['shares'][$id]){
+                                $dirty_flag=false;
+                                $normalized=share_normalize_entry($id,$entry,$dirty_flag);
+                                if ($normalized){
+                                        $storage['shares'][$id]=$normalized;
+                                        save_folder_share($storage);
+                                        return $storage['shares'][$id];
+                                }
+
+                                unset($storage['shares'][$id]);
+                                save_folder_share($storage);
+                                return null;
+                        }
+
+                        return $storage['shares'][$id];
+                }
+
+                if (!$path){
+                        $path=id2file($id);
+                }
+
+                if (!$path||(!is_dir($path)&&!is_file($path))){
+                        return null;
+                }
+
+                if (!$owner){
+                        $owner=return_owner($id);
+                }
+
+                if (!$owner){
+                        return null;
+                }
+
+                $storage['shares'][$id]=array(
+                        'owner'=>$owner,
+                        'path'=>$path,
+                        'token'=>share_new_token(),
+                        'created_at'=>time(),
+                        'expires_at'=>null,
+                        'recipients'=>array(),
+                        'active'=>true,
+                );
+
+                save_folder_share($storage);
+
+                return $storage['shares'][$id];
+        }
+
+        function share_public_path($id,$entry=null){
+                if (!is_string($id)||$id===''){
+                        return null;
+                }
+
+                if ($entry===null){
+                        $storage=load_folder_share();
+                        $entry=$storage['shares'][$id]??null;
+                }
+
+                if (empty($entry)||!is_array($entry)){
+                        return null;
+                }
+
+                if (empty($entry['token'])||!is_string($entry['token'])){
+                        return null;
+                }
+
+                return 'index.php?share='.$id.'&t='.$entry['token'];
+        }
+
+        function share_revoke(string $id): bool{
+                $storage=load_folder_share();
+                if (empty($storage['shares'][$id])){
+                        return false;
+                }
+
+                $entry=$storage['shares'][$id];
+                $entry['active']=false;
+                $entry['token']=null;
+                $storage['shares'][$id]=$entry;
+                save_folder_share($storage);
+
+                return true;
+        }
+
+        function share_regenerate(string $id): ?array{
+                $storage=load_folder_share();
+                if (empty($storage['shares'][$id])){
+                        $existing=share_ensure_entry($id);
+                        if (empty($existing)){
+                                return null;
+                        }
+                        $storage=load_folder_share();
+                }
+
+                $entry=$storage['shares'][$id];
+                $path=$entry['path']??null;
+                if (!is_string($path)||$path===''){
+                        $path=id2file($id);
+                }
+                if (!$path||(!is_dir($path)&&!is_file($path))){
+                        share_revoke($id);
+                        return null;
+                }
+
+                $owner=null;
+                if (!empty($entry['owner'])&&is_string($entry['owner'])){
+                        $owner=$entry['owner'];
+                }
+                if (!$owner){
+                        $owner=return_owner($id);
+                }
+                if (!$owner){
+                        share_revoke($id);
+                        return null;
+                }
+
+                if (!share_revoke($id)){
+                        return null;
+                }
+
+                removeID($id);
+                $new_id=addID($path);
+                if (!is_string($new_id)||$new_id===''){
+                        return null;
+                }
+
+                $storage=load_folder_share();
+                $revoked=$storage['shares'][$id]??null;
+                if (!is_array($revoked)){
+                        return null;
+                }
+
+                $revoked['token']=share_new_token();
+                $revoked['active']=true;
+                $revoked['created_at']=time();
+                $revoked['owner']=$owner;
+                $revoked['path']=$path;
+
+                $storage['shares'][$new_id]=$revoked;
+                save_folder_share($storage);
+
+                $fresh=load_folder_share();
+                if (empty($fresh['shares'][$new_id])){
+                        return null;
+                }
+
+                $normalized=$fresh['shares'][$new_id];
+                $normalized['id']=$new_id;
+
+                return $normalized;
+        }
+
 	function save_users_rights($array=null){return save($_SESSION['users_rights_file'],$array);}
 	function load_users_rights(){return load($_SESSION['users_rights_file']);}
 	function save_config($array=null){if (!$array){$array=$_SESSION['config'];}return save($_SESSION['config_file'],$array);}
@@ -259,35 +732,89 @@ Deny from all
 	} 
 
 	# store all client access to a file
-	function store_access_stat($file=null,$id=null){
-		if (!$file||!$id){return false;}
-		$host=$ref='&#8709;';
-		if (isset($_SERVER['REMOTE_HOST'])){$host=$_SERVER['REMOTE_HOST'];}
-		if (isset($_SERVER['HTTP_REFERER'])){$ref=$_SERVER['HTTP_REFERER'];}
-		if (isset($_GET['rss'])){$access='RSS';}
-		elseif (isset($_GET['json'])){$access='Json';}
-		elseif (isset($_GET['export'])){$access='Export';}
-		else{$access='Website';}
+        function encode_json($value){
+                $flags=JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE;
+                if (defined('JSON_INVALID_UTF8_SUBSTITUTE')){
+                        $flags|=JSON_INVALID_UTF8_SUBSTITUTE;
+                }
+                if (defined('JSON_THROW_ON_ERROR')){
+                        $flags|=JSON_THROW_ON_ERROR;
+                }
 
-		$data=array(
-			'ip'=>$_SERVER['REMOTE_ADDR'],
-			'host'=>$host,
-			'referrer'=>$ref,
-			'date'=>date('D d M, H:i:s'),
-			'file'=>$file,
-			'id'=>$id,
-			'access'=>$access
-		);
-		
-		$stats=load($_SESSION['stats_file']);
-		if (!is_array($stats)){$stats=array();}
-		if (count($stats)>conf('stats_max_entries')){
-			$stats=array_values($stats);
-			unset($stats[0]);
-		}
-		$stats[]=$data;
-		save($_SESSION['stats_file'], $stats);
-	}
+                try{
+                        $json=json_encode($value,$flags);
+                }catch(\Throwable $exception){
+                        return '[]';
+                }
+
+                if ($json===false){
+                        return '[]';
+                }
+
+                return $json;
+        }
+        function send_json($payload=array(),$status=200){
+                if (!is_int($status) || $status<100 || $status>599){
+                        $status=200;
+                }
+
+                if (!headers_sent()){
+                        http_response_code($status);
+                        header('Content-Type: application/json; charset=utf-8');
+                }
+
+                exit(encode_json($payload));
+        }
+        function store_access_stat($file=null,$id=null){
+                if (!is_string($file)||$file===''){return false;}
+                if (!is_string($id)||$id===''){return false;}
+
+                $host='&#8709;';
+                if (isset($_SERVER['REMOTE_HOST'])&&$_SERVER['REMOTE_HOST']!==''){
+                        $host=substr(strip_tags((string)$_SERVER['REMOTE_HOST']),0,255);
+                }
+
+                $ref='&#8709;';
+                if (isset($_SERVER['HTTP_REFERER'])&&$_SERVER['HTTP_REFERER']!==''){
+                        $ref=substr(strip_tags((string)$_SERVER['HTTP_REFERER']),0,2048);
+                }
+
+                if (isset($_GET['rss'])){$access='RSS';}
+                elseif (isset($_GET['json'])){$access='Json';}
+                elseif (isset($_GET['export'])){$access='Export';}
+                else{$access='Website';}
+
+                $ip='0.0.0.0';
+                if (isset($_SERVER['REMOTE_ADDR'])){
+                        $candidate=(string)$_SERVER['REMOTE_ADDR'];
+                        $zone=strpos($candidate,'%');
+                        if ($zone!==false){$candidate=substr($candidate,0,$zone);}
+                        if (filter_var($candidate,FILTER_VALIDATE_IP)!==false){
+                                $ip=$candidate;
+                        }
+                }
+
+                $data=array(
+                        'ip'=>$ip,
+                        'host'=>$host,
+                        'referrer'=>$ref,
+                        'date'=>date('D d M, H:i:s'),
+                        'file'=>$file,
+                        'id'=>$id,
+                        'access'=>$access
+                );
+
+                $stats=load($_SESSION['stats_file']);
+                if (!is_array($stats)){$stats=array();}
+
+                $stats[]=$data;
+                $limit=(int)conf('stats_max_entries');
+                if ($limit>0 && count($stats)>$limit){
+                        $stats=array_slice($stats,-$limit);
+                }
+
+                save($_SESSION['stats_file'], $stats);
+        }
 	function addslash_if_needed($chaine){
 		if (substr($chaine,strlen($chaine)-1,1)!='/'&&!empty($chaine)){return $chaine.'/';}else{return $chaine;}
 	}
@@ -389,44 +916,218 @@ Deny from all
 		unset($array[$first]);
 		return $array;		
 	}
-	function unzip($file, $destination){ 
-	    if (!class_exists('ZipArchive')){return false;}
-	    $zip = new ZipArchive() ;
-	    if ($zip->open($file) !== TRUE) { return false;} 
-	   	$zip->extractTo($destination); 
-	    $zip->close(); 
-	    return true; 
-	}
+        function unzip($file, $destination){
+            if (!class_exists('ZipArchive')){return false;}
+            if (empty($file) || !is_file($file) || !is_readable($file)){return false;}
+            if (empty($destination)){return false;}
+            if (!is_dir($destination) && !mkdir($destination, 0744, true)){return false;}
 
-	function zip($source, $destination)
-	{
-		if (!extension_loaded('zip')){return false;}
-		$zip = new ZipArchive();
-		if (is_file($destination)){unlink($destination);}
-		if (!$zip->open($destination, ZIPARCHIVE::CREATE)) {return false;}
-		if (is_string($source)){$source=array($source);}
-		foreach($source as $item){
-			if (is_dir($item) === true){
-				$files = array_keys(iterator_to_array(new RecursiveIteratorIterator(new RecursiveDirectoryIterator($item), RecursiveIteratorIterator::SELF_FIRST)));
-				$files[0]=dirname($files[1]);
-				foreach ($files as $key=>$file){
-					# Ignore "." and ".." folders
-					if( in_array(substr($file, strrpos($file, '/')+1), array('.', '..')) ){continue;}
-					$file_short=utf8_decode(str_replace(addslash_if_needed($_SESSION['upload_root_path'].$_SESSION['upload_user_path'].$_SESSION['current_path']),'',$file));
-					if (is_dir($file) === true){
-						$zip->addEmptyDir($file_short);
-					}else if (is_file($file) === true){
-						$zip->addFromString($file_short, file_get_contents($file));
-					}
-				}
-			}
-			else if (is_file($item) === true){
-				$zip->addFromString(_basename($item), file_get_contents($item));
-			}
+            $root = isset($_SESSION['upload_root_path']) ? realpath($_SESSION['upload_root_path']) : false;
+            if ($root === false){return false;}
+            $rootPrefix = rtrim($root, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
 
-		}
+            $targetRoot = realpath($destination);
+            if ($targetRoot === false){return false;}
+            $targetPrefix = rtrim($targetRoot, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+            if (strpos($targetPrefix, $rootPrefix) !== 0){return false;}
 
-	}
+            $zip = new ZipArchive();
+            if ($zip->open($file) !== true){return false;}
+
+            $createdFiles = array();
+            $createdDirs = array();
+            $abort = function() use ($zip, &$createdFiles, &$createdDirs){
+                $zip->close();
+                foreach ($createdFiles as $path){
+                    if (is_file($path)){@unlink($path);}
+                }
+                if (!empty($createdDirs)){
+                    usort($createdDirs, function($a, $b){
+                        return strlen($b) <=> strlen($a);
+                    });
+                }
+                foreach ($createdDirs as $path){
+                    if (is_dir($path)){@rmdir($path);}
+                }
+                return false;
+            };
+            $ensureDir = function($path) use (&$createdDirs){
+                if (is_dir($path)){return true;}
+                $build = array();
+                $current = $path;
+                while (!is_dir($current)){
+                    $build[] = $current;
+                    $parent = dirname($current);
+                    if ($parent === $current){break;}
+                    $current = $parent;
+                }
+                for ($i = count($build) - 1; $i >= 0; $i--){
+                    if (!mkdir($build[$i], 0744)){return false;}
+                    $createdDirs[] = $build[$i];
+                }
+                return is_dir($path);
+            };
+
+            $maxBytes = conf('max_length');
+            $maxBytes = is_numeric($maxBytes) ? (int)$maxBytes * 1024 * 1024 : 0;
+            $totalBytes = 0;
+
+            for ($index = 0; $index < $zip->numFiles; $index++){
+                $stat = $zip->statIndex($index);
+                if (!is_array($stat) || !isset($stat['name'])){return $abort();}
+
+                $rawName = $stat['name'];
+                $name = str_replace(chr(92), '/', $rawName);
+                if ($name === '' || strpos($name, "\0") !== false){return $abort();}
+                if ($name[0] === '/' || strpos($name, '../') !== false){return $abort();}
+                if (preg_match('#^[A-Za-z]:#', $name) === 1){return $abort();}
+
+                $totalBytes += isset($stat['size']) ? (int)$stat['size'] : 0;
+                if ($maxBytes > 0 && $totalBytes > $maxBytes){return $abort();}
+
+                $segments = array_filter(explode('/', $name), 'strlen');
+                $target = $targetRoot;
+                foreach ($segments as $segment){
+                    if ($segment === '.' || $segment === '..'){return $abort();}
+                    $target .= DIRECTORY_SEPARATOR.$segment;
+                }
+
+                $targetParent = dirname($target);
+                if (!$ensureDir($targetParent)){return $abort();}
+
+                $realParent = realpath($targetParent);
+                if ($realParent === false){return $abort();}
+                $parentPrefix = rtrim($realParent, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+                if (strpos($parentPrefix, $rootPrefix) !== 0){return $abort();}
+
+                $mode = isset($stat['external_attributes']) ? (($stat['external_attributes'] >> 16) & 0xF000) : 0;
+                $isDirectory = ($mode === 0x4000) || substr($name, -1) === '/';
+                $isSymlink = ($mode === 0xA000);
+                if ($isSymlink){return $abort();}
+
+                if ($isDirectory){
+                    if (!$ensureDir($target)){return $abort();}
+
+                    $realDir = realpath($target);
+                    if ($realDir === false){return $abort();}
+                    $dirPrefix = rtrim($realDir, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+                    if (strpos($dirPrefix, $rootPrefix) !== 0){return $abort();}
+                    continue;
+                }
+
+                $stream = $zip->getStream($rawName);
+                if (!$stream){return $abort();}
+
+                $handle = fopen($target, 'wb');
+                if (!$handle){
+                    fclose($stream);
+                    return $abort();
+                }
+
+                $writeOk = true;
+                while (!feof($stream)){
+                    $buffer = fread($stream, 8192);
+                    if ($buffer === false){
+                        $writeOk = false;
+                        break;
+                    }
+                    if ($buffer === ''){continue;}
+                    if (fwrite($handle, $buffer) === false){
+                        $writeOk = false;
+                        break;
+                    }
+                }
+
+                fclose($handle);
+                fclose($stream);
+
+                if (!$writeOk){
+                    if (is_file($target)){@unlink($target);}
+                    return $abort();
+                }
+
+                $realFile = realpath($target);
+                if ($realFile === false){
+                    if (is_file($target)){@unlink($target);}
+                    return $abort();
+                }
+                $filePrefix = rtrim($realFile, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+                if (strpos($filePrefix, $rootPrefix) !== 0){
+                    @unlink($realFile);
+                    return $abort();
+                }
+
+                $createdFiles[] = $realFile;
+            }
+
+            $zip->close();
+            return true;
+        }
+
+        function zip($source, $destination)
+        {
+                if (!extension_loaded('zip') || !class_exists('ZipArchive')){return false;}
+                if (empty($source) || empty($destination)){return false;}
+                if (!is_dir(dirname($destination)) && !mkdir(dirname($destination), 0744, true)){return false;}
+
+                $zip = new ZipArchive();
+                if (is_file($destination) && !unlink($destination)){return false;}
+                if ($zip->open($destination, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true){return false;}
+
+                $sources = is_array($source) ? $source : array($source);
+                $root = realpath($_SESSION['upload_root_path']);
+                if ($root === false){ $zip->close(); return false; }
+                $rootPrefix = rtrim($root, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+
+                foreach($sources as $item){
+                        if (!is_string($item)){ $zip->close(); @unlink($destination); return false; }
+                        $real = realpath($item);
+                        if ($real === false){ $zip->close(); @unlink($destination); return false; }
+                        $realPrefix = rtrim($real, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+                        if (strpos($realPrefix, $rootPrefix) !== 0){ $zip->close(); @unlink($destination); return false; }
+                        if (is_dir($real) === true){
+                                if (!is_readable($real)){ $zip->close(); @unlink($destination); return false; }
+                                $base = basename($real);
+                                if (!$zip->addEmptyDir($base)){ $zip->close(); @unlink($destination); return false; }
+
+                                $iterator = new RecursiveIteratorIterator(
+                                        new RecursiveDirectoryIterator($real, FilesystemIterator::SKIP_DOTS),
+                                        RecursiveIteratorIterator::SELF_FIRST
+                                );
+
+                                foreach ($iterator as $file){
+                                        $pathName = $file->getPathname();
+                                        $relative = substr($pathName, strlen($real) + 1);
+                                        $zipPath = $relative === false || $relative === '' ? $base : $base.'/'.str_replace(chr(92), '/', $relative);
+
+                                        if ($file->isLink()){ continue; }
+
+                                        if ($file->isDir()){
+                                                if (!$zip->addEmptyDir($zipPath)){ $zip->close(); @unlink($destination); return false; }
+                                                continue;
+                                        }
+
+                                        if (!$file->isFile() || !is_readable($pathName)){ $zip->close(); @unlink($destination); return false; }
+                                        if (!$zip->addFile($pathName, $zipPath)){ $zip->close(); @unlink($destination); return false; }
+                                }
+                        }
+                        else if (is_file($real) === true){
+                                if (!is_readable($real)){ $zip->close(); @unlink($destination); return false; }
+                                if (!$zip->addFile($real, basename($real))){ $zip->close(); @unlink($destination); return false; }
+                        }
+                        else{
+                                $zip->close(); @unlink($destination); return false;
+                        }
+
+                }
+
+                if ($zip->numFiles === 0){ $zip->close(); @unlink($destination); return false; }
+
+                $result = $zip->close();
+                if (!$result){ @unlink($destination); }
+                return $result;
+
+        }
 	
 	function check_path($path){
 		return (strpos($path, '//')===false && strpos($path, '..')===false && ( empty($path[0]) || (!empty($path[0]) && $path[0]!='/') || (!empty($path[0]) && $path[0]!='.') ) );
@@ -938,12 +1639,19 @@ Deny from all
 		}else{return false;}
 	}
 
-	function navigatorLanguage(){
-		if (!empty($_SERVER['HTTP_ACCEPT_LANGUAGE'])){
-			$language = $_SERVER['HTTP_ACCEPT_LANGUAGE'];
-			return $language{0}.$language{1};
-		}else{return 'fr';}
-	}
+        function navigatorLanguage(){
+                if (empty($_SERVER['HTTP_ACCEPT_LANGUAGE'])){
+                        return 'fr';
+                }
+
+                $language=$_SERVER['HTTP_ACCEPT_LANGUAGE'];
+                $code=substr($language,0,2);
+                if ($code===false || strlen($code)<2){
+                        return 'fr';
+                }
+
+                return strtolower($code);
+        }
 
 
 
