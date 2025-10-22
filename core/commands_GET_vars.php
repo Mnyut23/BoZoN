@@ -36,10 +36,34 @@
 	# export shared file(s) data in json format
         if (isset($_GET['export'])&& !empty($_GET['f'])){
                 $share_id=$_GET['f'];
-                $token=isset($_GET['t'])?$_GET['t']:'';
                 if (!isset($ids[$share_id]) || empty($ids[$share_id])){
                         send_json(array(),404);
                 }
+
+                $share_path=$ids[$share_id];
+                if (!is_file($share_path) && !is_dir($share_path)){
+                        send_json(array(),410);
+                }
+
+                $tree=array();
+                if (is_dir($share_path)){
+                        $content=folder_content($share_path);
+                        if (is_array($content)){
+                                foreach($content as $id=>$path){
+                                        $tree[$id]=array(
+                                                'path'=>$path,
+                                                'url'=>ROOT.'index.php?f='.$id,
+                                                'type'=>(is_dir($path)?'folder':'file')
+                                        );
+                                }
+                        }
+                }else{
+                        $tree=array($share_id=>$share_path);
+                }
+
+                store_access_stat($share_path,$share_id);
+                send_json($tree);
+        }
 
                 $share_path=$ids[$share_id];
                 $storage=load_folder_share();
