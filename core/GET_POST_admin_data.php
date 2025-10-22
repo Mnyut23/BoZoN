@@ -60,18 +60,20 @@
 	}
 
 	# unzip: convert zip file to folder
-	if (!empty($_GET['unzip']) && trim($_GET['unzip'])!==false && $_SESSION['zip']){
-		$id=$_GET['unzip'];
-		$zipfile=id2file($id);
-		$folder=str_ireplace('.zip','',_basename($zipfile));		
-		$id=new_folder($folder);
-		$destination=id2file($id);
-		unzip($zipfile,$destination);	
-		$sdi=array_flip($ids);
-		$unzipped_content=recursive_glob($destination);
-		foreach ($unzipped_content as $item){
-			if (empty($sdi[$item])){$ids[uniqid(true)]=$item;}
-		}
+        if (!empty($_GET['unzip']) && trim($_GET['unzip'])!==false && $_SESSION['zip']){
+                $zipId=$_GET['unzip'];
+                $zipfile=id2file($zipId);
+                if (!$zipfile || !is_file($zipfile)){http_response_code(404);exit;}
+                $folder=str_ireplace('.zip','',_basename($zipfile));
+                $newId=new_folder($folder);
+                if (!$newId){http_response_code(500);exit;}
+                $destination=id2file($newId);
+                if (!$destination || !unzip($zipfile,$destination)){http_response_code(500);exit;}
+                $sdi=array_flip($ids);
+                $unzipped_content=recursive_glob($destination);
+                foreach ($unzipped_content as $item){
+                        if (empty($sdi[$item])){$ids[uniqid(true)]=$item;}
+                }
 		store($ids);
 		//$ids=updateIDs($ids,$id);
 		header('location:index.php?p=admin&token='.TOKEN);
@@ -216,19 +218,21 @@
 	}
 
 	# zip and download a folder
-	if (!empty($_GET['zipfolder']) && $_SESSION['zip']){
-		$folder=id2file($_GET['zipfolder']);
-		if (!is_dir($_SESSION['temp_folder'])){mkdir($_SESSION['temp_folder']);}
-		$zipfile=$_SESSION['temp_folder'].return_owner($_GET['zipfolder']).'-'._basename($folder).'.zip';
-		zip($folder,$zipfile);
-		header('Content-type: application/zip');
-		header('Content-Transfer-Encoding: binary');
-		header('Content-Length: '.filesize($zipfile));
-		# lance le téléchargement des fichiers non affichables
-		header('Content-Disposition: attachment; filename="'._basename($zipfile).'"');
-		myFread($zipfile);
-		exit;
-	}
+        if (!empty($_GET['zipfolder']) && $_SESSION['zip']){
+                $folder=id2file($_GET['zipfolder']);
+                if (!$folder || !is_dir($folder)){http_response_code(404);exit;}
+                if (!is_dir($_SESSION['temp_folder']) && !mkdir($_SESSION['temp_folder'],0744,true)){http_response_code(500);exit;}
+                $zipfile=$_SESSION['temp_folder'].return_owner($_GET['zipfolder']).'-'._basename($folder).'.zip';
+                if (!zip($folder,$zipfile) || !is_file($zipfile)){http_response_code(500);exit;}
+                header('Content-type: application/zip');
+                header('Content-Transfer-Encoding: binary');
+                header('Content-Length: '.filesize($zipfile));
+                # lance le téléchargement des fichiers non affichables
+                header('Content-Disposition: attachment; filename="'._basename($zipfile).'"');
+                myFread($zipfile);
+                @unlink($zipfile);
+                exit;
+        }
 
 
 	######################################################################
@@ -302,21 +306,23 @@
 	}
 
 	# zip multiselection
-	if (!empty($_POST['item']) && !empty($_POST['multiselect_command']) && $_POST['multiselect_command']=='zip' && $_SESSION['zip']){
-		$zipfile=$_SESSION['temp_folder'].'Bozon_pack'.date('d-m-Y h-i-s').'.zip';
-		$file_list=array();
-		foreach ($_POST['item'] as $key => $item) {
-			$file_list[]=id2file($item);
-		}
-		if (!is_dir($_SESSION['temp_folder'])){mkdir($_SESSION['temp_folder']);}
-		zip($file_list,$zipfile);
-		header('Content-type: application/zip');
-		header('Content-Transfer-Encoding: binary');
-		header('Content-Length: '.filesize($zipfile));
-		# lance le téléchargement des fichiers non affichables
-		header('Content-Disposition: attachment; filename="'._basename($zipfile).'"');
-		readfile($zipfile);
-	}
+        if (!empty($_POST['item']) && !empty($_POST['multiselect_command']) && $_POST['multiselect_command']=='zip' && $_SESSION['zip']){
+                $zipfile=$_SESSION['temp_folder'].'Bozon_pack'.date('d-m-Y h-i-s').'.zip';
+                $file_list=array();
+                foreach ($_POST['item'] as $key => $item) {
+                        $file_list[]=id2file($item);
+                }
+                if (!is_dir($_SESSION['temp_folder']) && !mkdir($_SESSION['temp_folder'],0744,true)){http_response_code(500);exit;}
+                if (!zip($file_list,$zipfile) || !is_file($zipfile)){http_response_code(500);exit;}
+                header('Content-type: application/zip');
+                header('Content-Transfer-Encoding: binary');
+                header('Content-Length: '.filesize($zipfile));
+                # lance le téléchargement des fichiers non affichables
+                header('Content-Disposition: attachment; filename="'._basename($zipfile).'"');
+                readfile($zipfile);
+                @unlink($zipfile);
+                exit;
+        }
 
 	# Lock folder with password
 	if (!empty($_POST['pass'])&&!empty($_POST['id'])&&!empty($_POST['confirm'])&&is_owner($_POST['id'])&&$_POST['confirm']==$_POST['pass']){

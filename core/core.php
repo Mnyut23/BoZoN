@@ -308,6 +308,7 @@ Deny from all
 		# form https://openclassrooms.com/forum/sujet/savoir-si-un-dossier-est-vide-39930
 		if (!is_dir($src)){return 'no such dir';}
 		$h = opendir($src); 
+		$c = 0;
 		while (($o = readdir($h)) !== FALSE){ 
 			if (($o != '.') and ($o != '..')){$c++;} 
 		} 
@@ -502,9 +503,77 @@ Deny from all
 	}
         function unzip($file, $destination){
             if (!class_exists('ZipArchive')){return false;}
-            $zip = new ZipArchive() ;
-            if ($zip->open($file) !== TRUE) { return false;}
-                $zip->extractTo($destination);
+            if (empty($file) || !is_file($file) || !is_readable($file)){return false;}
+            if (empty($destination)){return false;}
+            if (!is_dir($destination) && !mkdir($destination, 0744, true)){return false;}
+
+            $root = realpath($_SESSION['upload_root_path']);
+            if ($root === false){return false;}
+            $rootPrefix = rtrim($root, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+            $targetRoot = realpath($destination);
+            if ($targetRoot === false){return false;}
+            $targetPrefix = rtrim($targetRoot, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+            if (strpos($targetPrefix, $rootPrefix) !== 0){return false;}
+
+            $zip = new ZipArchive();
+            if ($zip->open($file) !== true){return false;}
+
+            $maxBytes = conf('max_length');
+            $maxBytes = is_numeric($maxBytes) ? (int)$maxBytes * 1024 * 1024 : 0;
+            $totalBytes = 0;
+
+            for ($index = 0; $index < $zip->numFiles; $index++){
+                $stat = $zip->statIndex($index);
+                if (empty($stat) || empty($stat['name'])){ $zip->close(); return false; }
+
+                $name = str_replace(chr(92), '/', $stat['name']);
+                if ($name === '' || strpos($name, "\0") !== false){ $zip->close(); return false; }
+                $hasWindowsDrive = preg_match('#^[A-Za-z]:#', $name) === 1;
+                if ($hasWindowsDrive || $name[0] === '/' || strpos($name, '../') !== false){ $zip->close(); return false; }
+
+                $totalBytes += (int)$stat['size'];
+                if ($maxBytes > 0 && $totalBytes > $maxBytes){ $zip->close(); return false; }
+
+                $segments = array_filter(explode('/', $name), 'strlen');
+                $target = $targetRoot;
+                foreach ($segments as $segment){
+                    if ($segment === '.' || $segment === '..'){ $zip->close(); return false; }
+                    $target .= DIRECTORY_SEPARATOR.$segment;
+                }
+
+                $targetParent = dirname($target);
+                if (!is_dir($targetParent) && !mkdir($targetParent, 0744, true)){ $zip->close(); return false; }
+                $realParent = realpath($targetParent);
+                if ($realParent === false){ $zip->close(); return false; }
+                $parentPrefix = rtrim($realParent, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+                if (strpos($parentPrefix, $rootPrefix) !== 0){ $zip->close(); return false; }
+
+                $isDirectory = ( ($stat['external_attributes'] >> 16) & 0xF000 ) === 0x4000;
+                $isDirectory = $isDirectory || substr($name, -1) === '/';
+                $isSymlink = ( ($stat['external_attributes'] >> 16) & 0xF000 ) === 0xA000;
+                if ($isSymlink){ continue; }
+
+                if ($isDirectory){
+                    if (!is_dir($target) && !mkdir($target, 0744, true)){ $zip->close(); return false; }
+                    continue;
+                }
+
+                $stream = $zip->getStream($stat['name']);
+                if (!$stream){ $zip->close(); return false; }
+
+                $handle = fopen($target, 'wb');
+                if (!$handle){ fclose($stream); $zip->close(); return false; }
+
+                while (!feof($stream)){
+                    $buffer = fread($stream, 8192);
+                    if ($buffer === false){ fclose($handle); fclose($stream); $zip->close(); return false; }
+                    if (fwrite($handle, $buffer) === false){ fclose($handle); fclose($stream); $zip->close(); return false; }
+                }
+
+                fclose($handle);
+                fclose($stream);
+            }
+
             $zip->close();
             return true;
         }
@@ -541,56 +610,65 @@ Deny from all
         function zip($source, $destination)
         {
                 if (!extension_loaded('zip') || !class_exists('ZipArchive')){return false;}
+                if (empty($source) || empty($destination)){return false;}
+                if (!is_dir(dirname($destination)) && !mkdir(dirname($destination), 0744, true)){return false;}
+
                 $zip = new ZipArchive();
-                if (is_file($destination) && !@unlink($destination)){return false;}
-                if (!$zip->open($destination, ZipArchive::CREATE | ZipArchive::OVERWRITE)) {return false;}
+                if (is_file($destination) && !unlink($destination)){return false;}
+                if ($zip->open($destination, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true){return false;}
+
                 $sources = is_array($source) ? $source : array($source);
+                $root = realpath($_SESSION['upload_root_path']);
+                if ($root === false){ $zip->close(); return false; }
+                $rootPrefix = rtrim($root, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+
                 foreach($sources as $item){
-                        if (is_dir($item)){
-                                $realBase = realpath($item);
-                                $realBase = $realBase === false ? $item : $realBase;
-                                $realBase = addslash_if_needed(str_replace('\\', '/', $realBase));
-                                $sessionBase = '';
-                                if (isset($_SESSION['upload_root_path'], $_SESSION['upload_user_path'], $_SESSION['current_path'])){
-                                        $sessionBase = addslash_if_needed(str_replace('\\', '/', $_SESSION['upload_root_path'].$_SESSION['upload_user_path'].$_SESSION['current_path']));
-                                }
-                                if ($sessionBase === ''){$sessionBase = $realBase;}
+                        if (!is_string($item)){ $zip->close(); @unlink($destination); return false; }
+                        $real = realpath($item);
+                        if ($real === false){ $zip->close(); @unlink($destination); return false; }
+                        $realPrefix = rtrim($real, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+                        if (strpos($realPrefix, $rootPrefix) !== 0){ $zip->close(); @unlink($destination); return false; }
+                        if (is_dir($real) === true){
+                                if (!is_readable($real)){ $zip->close(); @unlink($destination); return false; }
+                                $base = basename($real);
+                                if (!$zip->addEmptyDir($base)){ $zip->close(); @unlink($destination); return false; }
+
                                 $iterator = new RecursiveIteratorIterator(
-                                        new RecursiveDirectoryIterator($item, RecursiveDirectoryIterator::SKIP_DOTS),
+                                        new RecursiveDirectoryIterator($real, FilesystemIterator::SKIP_DOTS),
                                         RecursiveIteratorIterator::SELF_FIRST
                                 );
-                                foreach ($iterator as $fileInfo){
-                                        $file = $fileInfo->getPathname();
-                                        $normalizedFile = str_replace('\\', '/', $file);
-                                        $file_short = ltrim(str_replace($sessionBase, '', $normalizedFile), '/');
-                                        if ($file_short === $normalizedFile){
-                                                $file_short = ltrim(str_replace($realBase, '', $normalizedFile), '/');
+
+                                foreach ($iterator as $file){
+                                        $pathName = $file->getPathname();
+                                        $relative = substr($pathName, strlen($real) + 1);
+                                        $zipPath = $relative === false || $relative === '' ? $base : $base.'/'.str_replace(chr(92), '/', $relative);
+
+                                        if ($file->isLink()){ continue; }
+
+                                        if ($file->isDir()){
+                                                if (!$zip->addEmptyDir($zipPath)){ $zip->close(); @unlink($destination); return false; }
+                                                continue;
                                         }
-                                        $file_short = zipSanitizeName($file_short);
-                                        if ($file_short === ''){continue;}
-                                        if ($fileInfo->isDir()){
-                                                if (!$zip->addEmptyDir($file_short)){
-                                                        $zip->close();
-                                                        return false;
-                                                }
-                                        }else{
-                                                $contents = file_get_contents($file);
-                                                if ($contents === false || !$zip->addFromString($file_short, $contents)){
-                                                        $zip->close();
-                                                        return false;
-                                                }
-                                        }
-                                }
-                        }elseif (is_file($item)){
-                                $contents = file_get_contents($item);
-                                $filename = zipSanitizeName(_basename($item));
-                                if ($contents === false || !$zip->addFromString($filename, $contents)){
-                                        $zip->close();
-                                        return false;
+
+                                        if (!$file->isFile() || !is_readable($pathName)){ $zip->close(); @unlink($destination); return false; }
+                                        if (!$zip->addFile($pathName, $zipPath)){ $zip->close(); @unlink($destination); return false; }
                                 }
                         }
+                        else if (is_file($real) === true){
+                                if (!is_readable($real)){ $zip->close(); @unlink($destination); return false; }
+                                if (!$zip->addFile($real, basename($real))){ $zip->close(); @unlink($destination); return false; }
+                        }
+                        else{
+                                $zip->close(); @unlink($destination); return false;
+                        }
+
                 }
-                return $zip->close();
+
+                if ($zip->numFiles === 0){ $zip->close(); @unlink($destination); return false; }
+
+                $result = $zip->close();
+                if (!$result){ @unlink($destination); }
+                return $result;
 
         }
 	
@@ -816,11 +894,6 @@ Deny from all
 		if (!$ids){$ids=unstore();}
 		if (empty($user)){$user=$_SESSION['login'];}
 		if (empty($path)){$path=$_SESSION['upload_root_path'].$user.'/';
-			/*if (!empty($user)){$path=$_SESSION['upload_root_path'].$user.'/';}
-			elseif (!empty($_SESSION['upload_user_path'])){
-				$path=$_SESSION['upload_root_path'].$_SESSION['upload_user_path'];
-				$user=$_SESSION['login'];
-			}else{$path=$_SESSION['upload_root_path'];}*/
 		}
 		
 		$tree=array();
@@ -903,7 +976,6 @@ Deny from all
 		function _mime_content_type($filename) {return finfo_file( finfo_open( FILEINFO_MIME_TYPE ), $filename );}
 	}else{
 		function _mime_content_type($filename){
-			#inspired by http://stackoverflow.com/questions/8225644/php-mime-type-checking-alternative-way-of-doing-it
 		    $mime_types = array(
 		        'txt' => 'text/plain',
 		        'md' => 'text/plain',
@@ -989,6 +1061,7 @@ Deny from all
 		$image_only=only_type($tree,'.jpg .jpeg .gif .png');
 		$sound_only=only_type($tree,'.mp3 .ogg .wav');
 		$readme=array_search(dirname($tree[$second]).'/readme.md', array_map('strtolower',$tree));
+		if ($readme&&!$tree[$readme]){$readme=false;}
 		if ($readme&&!empty($tree[$readme])&&is_file($tree[$readme])){$readme=file_get_contents($tree[$readme]);}
 		if (!$image_only&&!$sound_only){
 			# file list tree		
@@ -1104,26 +1177,13 @@ Deny from all
 		}else{return false;}
 	}
 
-function navigatorLanguage() {
-    // Hole Header; Fallback leer
-    $h = $_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? '';
-
-    // Wenn nichts Sinnvolles: Default
-    if (!is_string($h) || $h === '') {
-        return 'fr';
-    }
-
-    // Kürze auf 2er Sprachcode
-    $code = substr($h, 0, 2);
-
-    // Defensive Checks
-    if ($code === false || strlen($code) < 2) {
-        return 'fr';
-    }
-
-    return strtolower($code);
-}
-
+        function navigatorLanguage(){
+            $h = $_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? '';
+            if (!is_string($h) || $h === ''){ return 'fr'; }
+            $code = substr($h, 0, 2);
+            if ($code === false || strlen($code) < 2){ return 'fr'; }
+            return strtolower($code);
+        }
 
 
 
@@ -1468,7 +1528,6 @@ function navigatorLanguage() {
 				}
 				echo '</tr>';
 			}
-			//echo "'$varname' => e('text',false),\n";
 		}
 		newToken();
 		echo '<tr><td></td><td><input type="submit" class="btn" value="Ok"/><td><tr></table></form>';

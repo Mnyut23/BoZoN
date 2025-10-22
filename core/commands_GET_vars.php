@@ -114,17 +114,19 @@
 	# zip and download a folder from visitor's share page
 	if (!empty($_GET['zipfolder'])&&$_SESSION['zip']){
 		$folder=id2file($_GET['zipfolder']);
-		if (!is_dir($_SESSION['temp_folder'])){mkdir($_SESSION['temp_folder']);}
+		if (!$folder || !is_dir($folder)){http_response_code(404);exit;}
+		if (!is_dir($_SESSION['temp_folder']) && !mkdir($_SESSION['temp_folder'],0744,true)){http_response_code(500);exit;}
 		$zipfile=$_SESSION['temp_folder'].return_owner($_GET['zipfolder']).'-'._basename($folder).'.zip';
-		zip($folder,$zipfile);
+		if (!zip($folder,$zipfile) || !is_file($zipfile)){http_response_code(500);exit;}
 		header('Content-type: application/zip');
 		header('Content-Transfer-Encoding: binary');
 		header('Content-Length: '.filesize($zipfile));
 		# lance le téléchargement des fichiers non affichables
 		header('Content-Disposition: attachment; filename="'._basename($zipfile).'"');
 		readfile($zipfile);
+		@unlink($zipfile);
 		exit;
-	}
+		}
 
 	if (is_user_connected()){
 		# users list request
