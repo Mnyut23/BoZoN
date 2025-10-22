@@ -308,6 +308,7 @@ Deny from all
 		# form https://openclassrooms.com/forum/sujet/savoir-si-un-dossier-est-vide-39930
 		if (!is_dir($src)){return 'no such dir';}
 		$h = opendir($src); 
+		$c = 0;
 		while (($o = readdir($h)) !== FALSE){ 
 			if (($o != '.') and ($o != '..')){$c++;} 
 		} 
@@ -575,6 +576,35 @@ Deny from all
 
             $zip->close();
             return true;
+        }
+
+        function myFread($filename, $chunkSize = 1048576){
+                if (!is_string($filename) || $filename === '' || !is_file($filename) || !is_readable($filename)){return false;}
+                $handle = fopen($filename, 'rb');
+                if ($handle === false){return false;}
+                # Stream chunks to keep memory low
+                while (!feof($handle)){
+                        $buffer = fread($handle, $chunkSize);
+                        if ($buffer === false){
+                                fclose($handle);
+                                return false;
+                        }
+                        echo $buffer;
+                        if (ob_get_level() > 0){ob_flush();}
+                        flush();
+                }
+                fclose($handle);
+                return true;
+        }
+
+        function zipSanitizeName($value){
+                if (!is_string($value) || $value === ''){return $value;}
+                # Keep compatibility with legacy unzip tools
+                if (function_exists('iconv')){
+                        $converted = @iconv('UTF-8', 'ISO-8859-1//TRANSLIT//IGNORE', $value);
+                        if ($converted !== false && $converted !== ''){return $converted;}
+                }
+                return $value;
         }
 
         function zip($source, $destination)
@@ -864,11 +894,6 @@ Deny from all
 		if (!$ids){$ids=unstore();}
 		if (empty($user)){$user=$_SESSION['login'];}
 		if (empty($path)){$path=$_SESSION['upload_root_path'].$user.'/';
-			/*if (!empty($user)){$path=$_SESSION['upload_root_path'].$user.'/';}
-			elseif (!empty($_SESSION['upload_user_path'])){
-				$path=$_SESSION['upload_root_path'].$_SESSION['upload_user_path'];
-				$user=$_SESSION['login'];
-			}else{$path=$_SESSION['upload_root_path'];}*/
 		}
 		
 		$tree=array();
@@ -951,7 +976,6 @@ Deny from all
 		function _mime_content_type($filename) {return finfo_file( finfo_open( FILEINFO_MIME_TYPE ), $filename );}
 	}else{
 		function _mime_content_type($filename){
-			#inspired by http://stackoverflow.com/questions/8225644/php-mime-type-checking-alternative-way-of-doing-it
 		    $mime_types = array(
 		        'txt' => 'text/plain',
 		        'md' => 'text/plain',
@@ -1037,6 +1061,7 @@ Deny from all
 		$image_only=only_type($tree,'.jpg .jpeg .gif .png');
 		$sound_only=only_type($tree,'.mp3 .ogg .wav');
 		$readme=array_search(dirname($tree[$second]).'/readme.md', array_map('strtolower',$tree));
+		if ($readme&&!$tree[$readme]){$readme=false;}
 		if ($readme&&!empty($tree[$readme])&&is_file($tree[$readme])){$readme=file_get_contents($tree[$readme]);}
 		if (!$image_only&&!$sound_only){
 			# file list tree		
@@ -1153,17 +1178,11 @@ Deny from all
 	}
 
         function navigatorLanguage(){
-                if (empty($_SERVER['HTTP_ACCEPT_LANGUAGE'])){
-                        return 'fr';
-                }
-
-                $language=$_SERVER['HTTP_ACCEPT_LANGUAGE'];
-                $code=substr($language,0,2);
-                if ($code===false || strlen($code)<2){
-                        return 'fr';
-                }
-
-                return strtolower($code);
+            $h = $_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? '';
+            if (!is_string($h) || $h === ''){ return 'fr'; }
+            $code = substr($h, 0, 2);
+            if ($code === false || strlen($code) < 2){ return 'fr'; }
+            return strtolower($code);
         }
 
 
@@ -1509,7 +1528,6 @@ Deny from all
 				}
 				echo '</tr>';
 			}
-			//echo "'$varname' => e('text',false),\n";
 		}
 		newToken();
 		echo '<tr><td></td><td><input type="submit" class="btn" value="Ok"/><td><tr></table></form>';
