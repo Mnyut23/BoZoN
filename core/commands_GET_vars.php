@@ -34,34 +34,44 @@
 	}
 	
 	# export shared file(s) data in json format
-        if (isset($_GET['export']) && !empty($_GET['f'])){
-                $share_id=(string)$_GET['f'];
-                $token=isset($_GET['t'])?(string)$_GET['t']:'';
-
-                if ($share_id===''){
-                        send_json(array(),404);
-                }
-
+        if (isset($_GET['export'])&& !empty($_GET['f'])){
+                $share_id=$_GET['f'];
                 if (!isset($ids[$share_id]) || empty($ids[$share_id])){
                         send_json(array(),404);
                 }
 
                 $share_path=$ids[$share_id];
-                $storage=load_folder_share();
-                if (empty($storage['shares'][$share_id])){
-                        $ensured=share_ensure_entry($share_id,return_owner($share_id),$share_path);
-                        if (!$ensured){
-                                send_json(array(),404);
+                if (!is_file($share_path) && !is_dir($share_path)){
+                        send_json(array(),410);
+                }
+
+                $tree=array();
+                if (is_dir($share_path)){
+                        $content=folder_content($share_path);
+                        if (is_array($content)){
+                                foreach($content as $id=>$path){
+                                        $tree[$id]=array(
+                                                'path'=>$path,
+                                                'url'=>ROOT.'index.php?f='.$id,
+                                                'type'=>(is_dir($path)?'folder':'file')
+                                        );
+                                }
                         }
-                        $storage=load_folder_share();
+                }else{
+                        $tree=array($share_id=>$share_path);
                 }
 
+                store_access_stat($share_path,$share_id);
+                send_json($tree);
+        }
+
+                $share_path=$ids[$share_id];
+                $storage=load_folder_share();
+                $entry=$storage['shares'][$share_id]??share_ensure_entry($share_id,return_owner($share_id),$share_path);
+                $storage=load_folder_share();
                 $entry=$storage['shares'][$share_id]??null;
-                if (!$entry || !share_is_active($entry) || $token===''){
-                        send_json(array(),404);
-                }
 
-                if (!hash_equals($entry['token'],$token)){
+                if (!$entry || !share_is_active($entry) || !is_string($token) || $token==='' || !hash_equals($entry['token'],$token)){
                         send_json(array(),404);
                 }
 
@@ -73,24 +83,28 @@
                 if (is_dir($share_path)){
                         $content=folder_content($share_path);
                         if (is_array($content)){
-                                foreach ($content as $id=>$path){
-                                        $child=share_ensure_entry($id,return_owner($id),$path);
-                                        if (!$child || !share_is_active($child)){
+                                foreach($content as $id=>$path){
+                                        $child_entry=share_ensure_entry($id,return_owner($id),$path);
+                                        $storage=load_folder_share();
+                                        $child=$storage['shares'][$id]??$child_entry;
+                                        if (!$child || empty($child['token'])){
                                                 continue;
                                         }
 
                                         $tree[$id]=array(
                                                 'path'=>$path,
                                                 'url'=>ROOT.'index.php?share='.$id.'&t='.$child['token'],
-                                                'type'=>is_dir($path)?'folder':'file'
+                                                'type'=>(is_dir($path)?'folder':'file')
                                         );
                                 }
                         }
                 }else{
-                        $tree[$share_id]=array(
-                                'path'=>$share_path,
-                                'url'=>ROOT.'index.php?share='.$share_id.'&t='.$entry['token'],
-                                'type'=>is_dir($share_path)?'folder':'file'
+                        $tree=array(
+                                $share_id=>array(
+                                        'path'=>$share_path,
+                                        'url'=>ROOT.'index.php?share='.$share_id.'&t='.$entry['token'],
+                                        'type'=>(is_dir($share_path)?'folder':'file')
+                                )
                         );
                 }
 
@@ -224,4 +238,4 @@
 	if (!empty($_GET['lang'])){conf('language',$_GET['lang']);header('location:index.php?p='.$page.'&token='.$token);}
 	if (!empty($_GET['aspect'])){conf('aspect',$_GET['aspect']);header('location:index.php?p='.$page.'&token='.$token);}
 	
-
+?>
