@@ -34,26 +34,36 @@
 	}
 	
 	# export shared file(s) data in json format
-	if (isset($_GET['export'])&!empty($_GET['f'])){
-		$tree=array();
-		if (!empty($ids[$_GET['f']])&&is_dir($ids[$_GET['f']])){
-			$content=folder_content($ids[$_GET['f']]);
-			foreach($content as $id=>$path){
-				# add item type to create folders when import
-				$tree[$id]['path']=$path;
-				$tree[$id]['url']=ROOT.'index.php?f='.$id;
-				if (is_dir($path)){
-					$tree[$id]['type']='folder';
-				}else{
-					$tree[$id]['type']='file';
-				}
-			}
-		}else{
-			$tree=array($_GET['f']=>$ids[$_GET['f']]);
-		}
-		store_access_stat($ids[$_GET['f']],$_GET['f']);
-		exit(json_encode($tree));
-	}
+        if (isset($_GET['export'])&& !empty($_GET['f'])){
+                $share_id=$_GET['f'];
+                if (!isset($ids[$share_id]) || empty($ids[$share_id])){
+                        send_json(array(),404);
+                }
+
+                $share_path=$ids[$share_id];
+                if (!is_file($share_path) && !is_dir($share_path)){
+                        send_json(array(),410);
+                }
+
+                $tree=array();
+                if (is_dir($share_path)){
+                        $content=folder_content($share_path);
+                        if (is_array($content)){
+                                foreach($content as $id=>$path){
+                                        $tree[$id]=array(
+                                                'path'=>$path,
+                                                'url'=>ROOT.'index.php?f='.$id,
+                                                'type'=>(is_dir($path)?'folder':'file')
+                                        );
+                                }
+                        }
+                }else{
+                        $tree=array($share_id=>$share_path);
+                }
+
+                store_access_stat($share_path,$share_id);
+                send_json($tree);
+        }
 
 	# public share request
 	if (!empty($_GET['f'])){
@@ -96,25 +106,27 @@
 
 
 	# ask for json format stats 
-	if (isset($_GET['statjson'])&&!empty($_GET['key'])&&hash_user($_GET['key'])){
-		$stats=load($_SESSION['stats_file']);
-		exit(json_encode($stats));
-	}	
+        if (isset($_GET['statjson'])&&!empty($_GET['key'])&&hash_user($_GET['key'])){
+                $stats=load($_SESSION['stats_file']);
+                send_json($stats);
+        }
 
 	# zip and download a folder from visitor's share page
 	if (!empty($_GET['zipfolder'])&&$_SESSION['zip']){
 		$folder=id2file($_GET['zipfolder']);
-		if (!is_dir($_SESSION['temp_folder'])){mkdir($_SESSION['temp_folder']);}
+		if (!$folder || !is_dir($folder)){http_response_code(404);exit;}
+		if (!is_dir($_SESSION['temp_folder']) && !mkdir($_SESSION['temp_folder'],0744,true)){http_response_code(500);exit;}
 		$zipfile=$_SESSION['temp_folder'].return_owner($_GET['zipfolder']).'-'._basename($folder).'.zip';
-		zip($folder,$zipfile);
+		if (!zip($folder,$zipfile) || !is_file($zipfile)){http_response_code(500);exit;}
 		header('Content-type: application/zip');
 		header('Content-Transfer-Encoding: binary');
 		header('Content-Length: '.filesize($zipfile));
 		# lance le téléchargement des fichiers non affichables
 		header('Content-Disposition: attachment; filename="'._basename($zipfile).'"');
 		readfile($zipfile);
+		@unlink($zipfile);
 		exit;
-	}
+		}
 
 	if (is_user_connected()){
 		# users list request
