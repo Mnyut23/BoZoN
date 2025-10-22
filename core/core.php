@@ -308,6 +308,7 @@ Deny from all
 		# form https://openclassrooms.com/forum/sujet/savoir-si-un-dossier-est-vide-39930
 		if (!is_dir($src)){return 'no such dir';}
 		$h = opendir($src); 
+		$c = 0;
 		while (($o = readdir($h)) !== FALSE){ 
 			if (($o != '.') and ($o != '..')){$c++;} 
 		} 
@@ -506,10 +507,9 @@ Deny from all
             if (empty($destination)){return false;}
             if (!is_dir($destination) && !mkdir($destination, 0744, true)){return false;}
 
-            $root = isset($_SESSION['upload_root_path']) ? realpath($_SESSION['upload_root_path']) : false;
+            $root = realpath($_SESSION['upload_root_path']);
             if ($root === false){return false;}
             $rootPrefix = rtrim($root, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
-
             $targetRoot = realpath($destination);
             if ($targetRoot === false){return false;}
             $targetPrefix = rtrim($targetRoot, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
@@ -518,134 +518,93 @@ Deny from all
             $zip = new ZipArchive();
             if ($zip->open($file) !== true){return false;}
 
-            $createdFiles = array();
-            $createdDirs = array();
-            $abort = function() use ($zip, &$createdFiles, &$createdDirs){
-                $zip->close();
-                foreach ($createdFiles as $path){
-                    if (is_file($path)){@unlink($path);}
-                }
-                if (!empty($createdDirs)){
-                    usort($createdDirs, function($a, $b){
-                        return strlen($b) <=> strlen($a);
-                    });
-                }
-                foreach ($createdDirs as $path){
-                    if (is_dir($path)){@rmdir($path);}
-                }
-                return false;
-            };
-            $ensureDir = function($path) use (&$createdDirs){
-                if (is_dir($path)){return true;}
-                $build = array();
-                $current = $path;
-                while (!is_dir($current)){
-                    $build[] = $current;
-                    $parent = dirname($current);
-                    if ($parent === $current){break;}
-                    $current = $parent;
-                }
-                for ($i = count($build) - 1; $i >= 0; $i--){
-                    if (!mkdir($build[$i], 0744)){return false;}
-                    $createdDirs[] = $build[$i];
-                }
-                return is_dir($path);
-            };
-
             $maxBytes = conf('max_length');
             $maxBytes = is_numeric($maxBytes) ? (int)$maxBytes * 1024 * 1024 : 0;
             $totalBytes = 0;
 
             for ($index = 0; $index < $zip->numFiles; $index++){
                 $stat = $zip->statIndex($index);
-                if (!is_array($stat) || !isset($stat['name'])){return $abort();}
+                if (empty($stat) || empty($stat['name'])){ $zip->close(); return false; }
 
-                $rawName = $stat['name'];
-                $name = str_replace(chr(92), '/', $rawName);
-                if ($name === '' || strpos($name, "\0") !== false){return $abort();}
-                if ($name[0] === '/' || strpos($name, '../') !== false){return $abort();}
-                if (preg_match('#^[A-Za-z]:#', $name) === 1){return $abort();}
+                $name = str_replace(chr(92), '/', $stat['name']);
+                if ($name === '' || strpos($name, "\0") !== false){ $zip->close(); return false; }
+                $hasWindowsDrive = preg_match('#^[A-Za-z]:#', $name) === 1;
+                if ($hasWindowsDrive || $name[0] === '/' || strpos($name, '../') !== false){ $zip->close(); return false; }
 
-                $totalBytes += isset($stat['size']) ? (int)$stat['size'] : 0;
-                if ($maxBytes > 0 && $totalBytes > $maxBytes){return $abort();}
+                $totalBytes += (int)$stat['size'];
+                if ($maxBytes > 0 && $totalBytes > $maxBytes){ $zip->close(); return false; }
 
                 $segments = array_filter(explode('/', $name), 'strlen');
                 $target = $targetRoot;
                 foreach ($segments as $segment){
-                    if ($segment === '.' || $segment === '..'){return $abort();}
+                    if ($segment === '.' || $segment === '..'){ $zip->close(); return false; }
                     $target .= DIRECTORY_SEPARATOR.$segment;
                 }
 
                 $targetParent = dirname($target);
-                if (!$ensureDir($targetParent)){return $abort();}
-
+                if (!is_dir($targetParent) && !mkdir($targetParent, 0744, true)){ $zip->close(); return false; }
                 $realParent = realpath($targetParent);
-                if ($realParent === false){return $abort();}
+                if ($realParent === false){ $zip->close(); return false; }
                 $parentPrefix = rtrim($realParent, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
-                if (strpos($parentPrefix, $rootPrefix) !== 0){return $abort();}
+                if (strpos($parentPrefix, $rootPrefix) !== 0){ $zip->close(); return false; }
 
-                $mode = isset($stat['external_attributes']) ? (($stat['external_attributes'] >> 16) & 0xF000) : 0;
-                $isDirectory = ($mode === 0x4000) || substr($name, -1) === '/';
-                $isSymlink = ($mode === 0xA000);
-                if ($isSymlink){return $abort();}
+                $isDirectory = ( ($stat['external_attributes'] >> 16) & 0xF000 ) === 0x4000;
+                $isDirectory = $isDirectory || substr($name, -1) === '/';
+                $isSymlink = ( ($stat['external_attributes'] >> 16) & 0xF000 ) === 0xA000;
+                if ($isSymlink){ continue; }
 
                 if ($isDirectory){
-                    if (!$ensureDir($target)){return $abort();}
-
-                    $realDir = realpath($target);
-                    if ($realDir === false){return $abort();}
-                    $dirPrefix = rtrim($realDir, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
-                    if (strpos($dirPrefix, $rootPrefix) !== 0){return $abort();}
+                    if (!is_dir($target) && !mkdir($target, 0744, true)){ $zip->close(); return false; }
                     continue;
                 }
 
-                $stream = $zip->getStream($rawName);
-                if (!$stream){return $abort();}
+                $stream = $zip->getStream($stat['name']);
+                if (!$stream){ $zip->close(); return false; }
 
                 $handle = fopen($target, 'wb');
-                if (!$handle){
-                    fclose($stream);
-                    return $abort();
-                }
+                if (!$handle){ fclose($stream); $zip->close(); return false; }
 
-                $writeOk = true;
                 while (!feof($stream)){
                     $buffer = fread($stream, 8192);
-                    if ($buffer === false){
-                        $writeOk = false;
-                        break;
-                    }
-                    if ($buffer === ''){continue;}
-                    if (fwrite($handle, $buffer) === false){
-                        $writeOk = false;
-                        break;
-                    }
+                    if ($buffer === false){ fclose($handle); fclose($stream); $zip->close(); return false; }
+                    if (fwrite($handle, $buffer) === false){ fclose($handle); fclose($stream); $zip->close(); return false; }
                 }
 
                 fclose($handle);
                 fclose($stream);
-
-                if (!$writeOk){
-                    if (is_file($target)){@unlink($target);}
-                    return $abort();
-                }
-
-                $realFile = realpath($target);
-                if ($realFile === false){
-                    if (is_file($target)){@unlink($target);}
-                    return $abort();
-                }
-                $filePrefix = rtrim($realFile, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
-                if (strpos($filePrefix, $rootPrefix) !== 0){
-                    @unlink($realFile);
-                    return $abort();
-                }
-
-                $createdFiles[] = $realFile;
             }
 
             $zip->close();
             return true;
+        }
+
+        function myFread($filename, $chunkSize = 1048576){
+                if (!is_string($filename) || $filename === '' || !is_file($filename) || !is_readable($filename)){return false;}
+                $handle = fopen($filename, 'rb');
+                if ($handle === false){return false;}
+                # Stream chunks to keep memory low
+                while (!feof($handle)){
+                        $buffer = fread($handle, $chunkSize);
+                        if ($buffer === false){
+                                fclose($handle);
+                                return false;
+                        }
+                        echo $buffer;
+                        if (ob_get_level() > 0){ob_flush();}
+                        flush();
+                }
+                fclose($handle);
+                return true;
+        }
+
+        function zipSanitizeName($value){
+                if (!is_string($value) || $value === ''){return $value;}
+                # Keep compatibility with legacy unzip tools
+                if (function_exists('iconv')){
+                        $converted = @iconv('UTF-8', 'ISO-8859-1//TRANSLIT//IGNORE', $value);
+                        if ($converted !== false && $converted !== ''){return $converted;}
+                }
+                return $value;
         }
 
         function zip($source, $destination)
@@ -935,11 +894,6 @@ Deny from all
 		if (!$ids){$ids=unstore();}
 		if (empty($user)){$user=$_SESSION['login'];}
 		if (empty($path)){$path=$_SESSION['upload_root_path'].$user.'/';
-			/*if (!empty($user)){$path=$_SESSION['upload_root_path'].$user.'/';}
-			elseif (!empty($_SESSION['upload_user_path'])){
-				$path=$_SESSION['upload_root_path'].$_SESSION['upload_user_path'];
-				$user=$_SESSION['login'];
-			}else{$path=$_SESSION['upload_root_path'];}*/
 		}
 		
 		$tree=array();
@@ -1022,7 +976,6 @@ Deny from all
 		function _mime_content_type($filename) {return finfo_file( finfo_open( FILEINFO_MIME_TYPE ), $filename );}
 	}else{
 		function _mime_content_type($filename){
-			#inspired by http://stackoverflow.com/questions/8225644/php-mime-type-checking-alternative-way-of-doing-it
 		    $mime_types = array(
 		        'txt' => 'text/plain',
 		        'md' => 'text/plain',
@@ -1108,6 +1061,7 @@ Deny from all
 		$image_only=only_type($tree,'.jpg .jpeg .gif .png');
 		$sound_only=only_type($tree,'.mp3 .ogg .wav');
 		$readme=array_search(dirname($tree[$second]).'/readme.md', array_map('strtolower',$tree));
+		if ($readme&&!$tree[$readme]){$readme=false;}
 		if ($readme&&!empty($tree[$readme])&&is_file($tree[$readme])){$readme=file_get_contents($tree[$readme]);}
 		if (!$image_only&&!$sound_only){
 			# file list tree		
@@ -1224,17 +1178,11 @@ Deny from all
 	}
 
         function navigatorLanguage(){
-                if (empty($_SERVER['HTTP_ACCEPT_LANGUAGE'])){
-                        return 'fr';
-                }
-
-                $language=$_SERVER['HTTP_ACCEPT_LANGUAGE'];
-                $code=substr($language,0,2);
-                if ($code===false || strlen($code)<2){
-                        return 'fr';
-                }
-
-                return strtolower($code);
+            $h = $_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? '';
+            if (!is_string($h) || $h === ''){ return 'fr'; }
+            $code = substr($h, 0, 2);
+            if ($code === false || strlen($code) < 2){ return 'fr'; }
+            return strtolower($code);
         }
 
 
@@ -1580,7 +1528,6 @@ Deny from all
 				}
 				echo '</tr>';
 			}
-			//echo "'$varname' => e('text',false),\n";
 		}
 		newToken();
 		echo '<tr><td></td><td><input type="submit" class="btn" value="Ok"/><td><tr></table></form>';
