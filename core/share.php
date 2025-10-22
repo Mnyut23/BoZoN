@@ -131,8 +131,7 @@
                                                         }
                                                         # burn access ?
                                                         burned($id);
-                                                        header('Content-Type: application/json; charset=utf-8');
-                                                        exit(encode_json($id_tree));
+                                                        send_json($id_tree);
                                                 }
 
 						# RSS format of a shared folder (but not for a locked one)

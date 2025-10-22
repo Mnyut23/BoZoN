@@ -201,21 +201,30 @@ Deny from all
                 }
 
                 $payload=substr($raw,9,-6);
-                if ($payload===false){
+                if ($payload===false || $payload===''){
                         return array();
                 }
 
                 $decoded=base64_decode($payload,true);
-                if ($decoded===false){
+                if ($decoded===false || $decoded===''){
+                        return array();
+                }
+
+                if (strlen($decoded)>10485760){
                         return array();
                 }
 
                 $inflated=@gzinflate($decoded);
-                if ($inflated===false){
+                if ($inflated===false || $inflated===''){
                         return array();
                 }
 
-                $data=@unserialize($inflated,array('allowed_classes'=>false));
+                try{
+                        $data=@unserialize($inflated,array('allowed_classes'=>false));
+                }catch(\Throwable $exception){
+                        return array();
+                }
+
                 return (is_array($data)?$data:array());
         }
         function save($file,$data){
@@ -234,7 +243,7 @@ Deny from all
                         return false;
                 }
 
-                return file_put_contents($file,'<?php /* '.$encoded.' */ ?>');
+                return file_put_contents($file,'<?php /* '.$encoded.' */ ?>',LOCK_EX);
         }
 	function store($ids=null){if (!$ids){return false;}natcasesort($ids);return save($_SESSION['id_file'],$ids);}
 	function unstore(){return array_filter(load($_SESSION['id_file']));}
@@ -308,12 +317,37 @@ Deny from all
 
 	# store all client access to a file
         function encode_json($value){
-                $json=json_encode($value,JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);
+                $flags=JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE;
+                if (defined('JSON_INVALID_UTF8_SUBSTITUTE')){
+                        $flags|=JSON_INVALID_UTF8_SUBSTITUTE;
+                }
+                if (defined('JSON_THROW_ON_ERROR')){
+                        $flags|=JSON_THROW_ON_ERROR;
+                }
+
+                try{
+                        $json=json_encode($value,$flags);
+                }catch(\Throwable $exception){
+                        return '[]';
+                }
+
                 if ($json===false){
                         return '[]';
                 }
 
                 return $json;
+        }
+        function send_json($payload=array(),$status=200){
+                if (!is_int($status) || $status<100 || $status>599){
+                        $status=200;
+                }
+
+                if (!headers_sent()){
+                        http_response_code($status);
+                        header('Content-Type: application/json; charset=utf-8');
+                }
+
+                exit(encode_json($payload));
         }
         function store_access_stat($file=null,$id=null){
                 if (!is_string($file)||$file===''){return false;}
