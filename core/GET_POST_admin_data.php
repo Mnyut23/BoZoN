@@ -60,18 +60,20 @@
 	}
 
 	# unzip: convert zip file to folder
-	if (!empty($_GET['unzip']) && trim($_GET['unzip'])!==false && $_SESSION['zip']){
-		$id=$_GET['unzip'];
-		$zipfile=id2file($id);
-		$folder=str_ireplace('.zip','',_basename($zipfile));		
-		$id=new_folder($folder);
-		$destination=id2file($id);
-		unzip($zipfile,$destination);	
-		$sdi=array_flip($ids);
-		$unzipped_content=recursive_glob($destination);
-		foreach ($unzipped_content as $item){
-			if (empty($sdi[$item])){$ids[uniqid(true)]=$item;}
-		}
+        if (!empty($_GET['unzip']) && trim($_GET['unzip'])!==false && $_SESSION['zip']){
+                $zipId=$_GET['unzip'];
+                $zipfile=id2file($zipId);
+                if (!$zipfile || !is_file($zipfile)){http_response_code(404);exit;}
+                $folder=str_ireplace('.zip','',_basename($zipfile));
+                $newId=new_folder($folder);
+                if (!$newId){http_response_code(500);exit;}
+                $destination=id2file($newId);
+                if (!$destination || !unzip($zipfile,$destination)){http_response_code(500);exit;}
+                $sdi=array_flip($ids);
+                $unzipped_content=recursive_glob($destination);
+                foreach ($unzipped_content as $item){
+                        if (empty($sdi[$item])){$ids[uniqid(true)]=$item;}
+                }
 		store($ids);
 		//$ids=updateIDs($ids,$id);
 		header('location:index.php?p=admin&token='.TOKEN);
@@ -79,29 +81,26 @@
 	}	
 
 	# renew file id
-	if (!empty($_GET['renew']) && trim($_GET['renew'])!==false&&is_owner($_GET['renew'])){
-		$old_id=$_GET['renew'];
-		$path=id2file($old_id);
-		unset($ids[$old_id]);
-		$new_id=addID($path,$ids);
-		# change in share folder
-		
-		if (is_dir($path)){
-			$shares=load_folder_share();
-			$save=false;
-			foreach ($shares as $user=>$data){
-				if (!empty($data[$old_id])){					
-					if (!$remove_item_from_users_share_when_renew_id){
-						$shares[$user][$new_id]=$data[$old_id];
-					}
-					unset($shares[$user][$old_id]);$save=true;
-				}
-			}
-			if ($save){save_folder_share($shares);}
-		}
-		header('location:index.php?p=admin&token='.TOKEN);
-		exit;
-	}	
+        if (!empty($_GET['renew']) && trim($_GET['renew'])!==false&&is_owner($_GET['renew'])){
+                $old_id=$_GET['renew'];
+                $path=id2file($old_id);
+                if (!$path){
+                        http_response_code(404);
+                        exit;
+                }
+
+                $replacement=share_regenerate($old_id);
+                if (!empty($replacement['id'])){
+                        $ids=unstore();
+                }else{
+                        unset($ids[$old_id]);
+                        addID($path,$ids);
+                        $ids=unstore();
+                }
+
+                header('location:index.php?p=admin&token='.TOKEN);
+                exit;
+        }
 
 	# create burn after acces state
 	if (!empty($_GET['burn']) && trim($_GET['burn'])!==false&&is_owner($_GET['burn'])){
@@ -216,19 +215,21 @@
 	}
 
 	# zip and download a folder
-	if (!empty($_GET['zipfolder']) && $_SESSION['zip']){
-		$folder=id2file($_GET['zipfolder']);
-		if (!is_dir($_SESSION['temp_folder'])){mkdir($_SESSION['temp_folder']);}
-		$zipfile=$_SESSION['temp_folder'].return_owner($_GET['zipfolder']).'-'._basename($folder).'.zip';
-		zip($folder,$zipfile);
-		header('Content-type: application/zip');
-		header('Content-Transfer-Encoding: binary');
-		header('Content-Length: '.filesize($zipfile));
-		# lance le téléchargement des fichiers non affichables
-		header('Content-Disposition: attachment; filename="'._basename($zipfile).'"');
-		myFread($zipfile);
-		exit;
-	}
+        if (!empty($_GET['zipfolder']) && $_SESSION['zip']){
+                $folder=id2file($_GET['zipfolder']);
+                if (!$folder || !is_dir($folder)){http_response_code(404);exit;}
+                if (!is_dir($_SESSION['temp_folder']) && !mkdir($_SESSION['temp_folder'],0744,true)){http_response_code(500);exit;}
+                $zipfile=$_SESSION['temp_folder'].return_owner($_GET['zipfolder']).'-'._basename($folder).'.zip';
+                if (!zip($folder,$zipfile) || !is_file($zipfile)){http_response_code(500);exit;}
+                header('Content-type: application/zip');
+                header('Content-Transfer-Encoding: binary');
+                header('Content-Length: '.filesize($zipfile));
+                # lance le téléchargement des fichiers non affichables
+                header('Content-Disposition: attachment; filename="'._basename($zipfile).'"');
+                myFread($zipfile);
+                @unlink($zipfile);
+                exit;
+        }
 
 
 	######################################################################
@@ -302,21 +303,23 @@
 	}
 
 	# zip multiselection
-	if (!empty($_POST['item']) && !empty($_POST['multiselect_command']) && $_POST['multiselect_command']=='zip' && $_SESSION['zip']){
-		$zipfile=$_SESSION['temp_folder'].'Bozon_pack'.date('d-m-Y h-i-s').'.zip';
-		$file_list=array();
-		foreach ($_POST['item'] as $key => $item) {
-			$file_list[]=id2file($item);
-		}
-		if (!is_dir($_SESSION['temp_folder'])){mkdir($_SESSION['temp_folder']);}
-		zip($file_list,$zipfile);
-		header('Content-type: application/zip');
-		header('Content-Transfer-Encoding: binary');
-		header('Content-Length: '.filesize($zipfile));
-		# lance le téléchargement des fichiers non affichables
-		header('Content-Disposition: attachment; filename="'._basename($zipfile).'"');
-		readfile($zipfile);
-	}
+        if (!empty($_POST['item']) && !empty($_POST['multiselect_command']) && $_POST['multiselect_command']=='zip' && $_SESSION['zip']){
+                $zipfile=$_SESSION['temp_folder'].'Bozon_pack'.date('d-m-Y h-i-s').'.zip';
+                $file_list=array();
+                foreach ($_POST['item'] as $key => $item) {
+                        $file_list[]=id2file($item);
+                }
+                if (!is_dir($_SESSION['temp_folder']) && !mkdir($_SESSION['temp_folder'],0744,true)){http_response_code(500);exit;}
+                if (!zip($file_list,$zipfile) || !is_file($zipfile)){http_response_code(500);exit;}
+                header('Content-type: application/zip');
+                header('Content-Transfer-Encoding: binary');
+                header('Content-Length: '.filesize($zipfile));
+                # lance le téléchargement des fichiers non affichables
+                header('Content-Disposition: attachment; filename="'._basename($zipfile).'"');
+                readfile($zipfile);
+                @unlink($zipfile);
+                exit;
+        }
 
 	# Lock folder with password
 	if (!empty($_POST['pass'])&&!empty($_POST['id'])&&!empty($_POST['confirm'])&&is_owner($_POST['id'])&&$_POST['confirm']==$_POST['pass']){
@@ -334,25 +337,39 @@
 	}
 
 	# Handle folder share with users
-	if (!empty($_POST['share'])&&is_owner($_POST['share'])){
-		$folder_id=$_POST['share'];
-		$users=$auto_restrict['users'];
-		unset($users[$_SESSION['login']]);
-		$shared_with=load_folder_share();
-		$sent=array_flip($_POST['users']);
-		foreach ($users as $login=>$data){
-			if (isset($sent[$login])){
-				# User checked: add share
-				$shared_with[$login][$folder_id]=array('folder'=>id2file($folder_id),'from'=>$_SESSION['login']);
-			}else{
-				# User not checked: remove share if exists
-				if (isset($shared_with[$login][$folder_id])){unset($shared_with[$login][$folder_id]);}
-			}
-		}
-		save_folder_share($shared_with);
-		header('location:index.php?p=admin&mode=links&token='.TOKEN);
-		exit;
-	}
+        if (!empty($_POST['share'])&&is_owner($_POST['share'])){
+                $folder_id=$_POST['share'];
+                $users=$auto_restrict['users'];
+                unset($users[$_SESSION['login']]);
+                $storage=load_folder_share();
+                $entry=share_ensure_entry($folder_id,$_SESSION['login'],id2file($folder_id));
+                if (!$entry){
+                        http_response_code(500);
+                        exit;
+                }
+
+                $recipients=array();
+                if (!empty($_POST['users'])&&is_array($_POST['users'])){
+                        foreach ($_POST['users'] as $recipient){
+                                $recipient=trim((string)$recipient);
+                                if ($recipient!==''&&isset($users[$recipient])){
+                                        $recipients[$recipient]=true;
+                                }
+                        }
+                }
+
+                $entry['recipients']=array_keys($recipients);
+                if (empty($entry['token'])){
+                        $entry['token']=share_new_token();
+                }
+                $entry['active']=true;
+                $entry['created_at']=time();
+                $storage=load_folder_share();
+                $storage['shares'][$folder_id]=$entry;
+                save_folder_share($storage);
+                header('location:index.php?p=admin&mode=links&token='.TOKEN);
+                exit;
+        }
 
 	# Handle users rights
 	if (isset($_POST['user_right'])&&is_allowed('change status rights')){
